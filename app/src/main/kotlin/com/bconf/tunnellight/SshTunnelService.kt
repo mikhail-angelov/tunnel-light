@@ -2,8 +2,13 @@ package com.bconf.tunnellight
 
 import android.app.*
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkRequest
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
+import android.net.wifi.WifiManager
 import androidx.core.app.ServiceCompat
 import com.jcraft.jsch.ChannelDirectTCPIP
 import com.jcraft.jsch.JSch
@@ -27,6 +32,19 @@ class SshTunnelService : Service() {
     @Volatile private var shouldRun = false
     private var session: Session? = null
     private var proxyServer: Socks5ProxyServer? = null
+    private var connectionThread: Thread? = null
+
+    private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
+
+    // Interrupt the reconnect sleep when network comes back
+    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) {
+            if (shouldRun && !isRunning) {
+                connectionThread?.interrupt()
+            }
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -41,11 +59,17 @@ class SshTunnelService : Service() {
         val user = intent.getStringExtra("user") ?: run { stopSelf(); return START_NOT_STICKY }
         val port = intent.getIntExtra("port", 22)
 
+        // Guard against double-start (e.g. system restart with START_REDELIVER_INTENT)
+        if (shouldRun) return START_REDELIVER_INTENT
+
         shouldRun = true
+        acquireLocks()
+        registerNetworkCallback()
+
         updateNotification("Connecting to $host…")
         sendStatus("Connecting to $host…")
 
-        Thread {
+        connectionThread = Thread {
             val keyFile = File(filesDir, "id_ed25519")
             while (shouldRun) {
                 var sess: Session? = null
@@ -56,7 +80,8 @@ class SshTunnelService : Service() {
 
                     sess = jsch.getSession(user, host, port)
                     sess.setConfig("StrictHostKeyChecking", "no")
-                    sess.setConfig("ServerAliveInterval", "30")
+                    sess.setConfig("TCPKeepAlive", "yes")
+                    sess.setConfig("ServerAliveInterval", "20")
                     sess.setConfig("ServerAliveCountMax", "3")
                     sess.connect(15_000)
 
@@ -73,10 +98,10 @@ class SshTunnelService : Service() {
                     while (shouldRun && sess.isConnected()) {
                         Thread.sleep(3_000)
                     }
+                } catch (e: InterruptedException) {
+                    // Woken up by networkCallback or stop — loop will re-evaluate shouldRun
                 } catch (e: Exception) {
-                    if (shouldRun) {
-                        sendStatus("Error: ${e.message}")
-                    }
+                    if (shouldRun) sendStatus("Error: ${e.message}")
                 } finally {
                     isRunning = false
                     proxy?.stop()
@@ -88,7 +113,7 @@ class SshTunnelService : Service() {
                 if (shouldRun) {
                     sendStatus("Reconnecting in 5s…")
                     updateNotification("Reconnecting…")
-                    Thread.sleep(5_000)
+                    try { Thread.sleep(5_000) } catch (_: InterruptedException) { /* network came back early */ }
                     if (shouldRun) {
                         sendStatus("Connecting to $host…")
                         updateNotification("Connecting to $host…")
@@ -96,9 +121,9 @@ class SshTunnelService : Service() {
                 }
             }
             stopSelf()
-        }.start()
+        }.also { it.start() }
 
-        return START_NOT_STICKY
+        return START_REDELIVER_INTENT
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -107,10 +132,48 @@ class SshTunnelService : Service() {
         shouldRun = false
         isRunning = false
         lastStatus = ""
+        connectionThread?.interrupt()
         proxyServer?.stop()
         session?.disconnect()
+        unregisterNetworkCallback()
+        releaseLocks()
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         super.onDestroy()
+    }
+
+    // --- helpers ---
+
+    private fun acquireLocks() {
+        wakeLock = getSystemService(PowerManager::class.java)
+            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "TunnelLight::SSH")
+            .also { it.acquire() }
+
+        val lockMode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+            WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+        else
+            @Suppress("DEPRECATION") WifiManager.WIFI_MODE_FULL_HIGH_PERF
+        wifiLock = applicationContext.getSystemService(WifiManager::class.java)
+            .createWifiLock(lockMode, "TunnelLight::WiFi")
+            .also { it.acquire() }
+    }
+
+    private fun releaseLocks() {
+        wakeLock?.let { if (it.isHeld) it.release() }
+        wifiLock?.let { if (it.isHeld) it.release() }
+    }
+
+    private fun registerNetworkCallback() {
+        runCatching {
+            getSystemService(ConnectivityManager::class.java)
+                .registerNetworkCallback(NetworkRequest.Builder().build(), networkCallback)
+        }
+    }
+
+    private fun unregisterNetworkCallback() {
+        runCatching {
+            getSystemService(ConnectivityManager::class.java)
+                .unregisterNetworkCallback(networkCallback)
+        }
     }
 
     private fun sendStatus(message: String) {
@@ -167,27 +230,20 @@ private class Socks5ProxyServer(private val session: Session, private val listen
             val inp = client.getInputStream()
             val out = client.getOutputStream()
 
-            // SOCKS5 greeting: VER(1) NMETHODS(1) METHODS(N)
             if (inp.read() != 5) { client.close(); return }
             val nMethods = inp.read()
             repeat(nMethods) { inp.read() }
-            out.write(byteArrayOf(5, 0)) // NO AUTH
+            out.write(byteArrayOf(5, 0))
             out.flush()
 
-            // Request: VER(1) CMD(1) RSV(1) ATYP(1) ...
             inp.read() // ver
             val cmd = inp.read()
             inp.read() // rsv
             val atype = inp.read()
 
             val targetHost = when (atype) {
-                1 -> { // IPv4
-                    val b = ByteArray(4); inp.read(b)
-                    b.joinToString(".") { (it.toInt() and 0xFF).toString() }
-                }
-                3 -> { // Domain
-                    val len = inp.read(); val b = ByteArray(len); inp.read(b); String(b)
-                }
+                1 -> { val b = ByteArray(4); inp.read(b); b.joinToString(".") { (it.toInt() and 0xFF).toString() } }
+                3 -> { val len = inp.read(); val b = ByteArray(len); inp.read(b); String(b) }
                 else -> {
                     out.write(byteArrayOf(5, 8, 0, 1, 0, 0, 0, 0, 0, 0)); out.flush()
                     client.close(); return
@@ -195,7 +251,7 @@ private class Socks5ProxyServer(private val session: Session, private val listen
             }
             val targetPort = (inp.read() shl 8) or inp.read()
 
-            if (cmd != 1) { // Only CONNECT
+            if (cmd != 1) {
                 out.write(byteArrayOf(5, 7, 0, 1, 0, 0, 0, 0, 0, 0)); out.flush()
                 client.close(); return
             }
