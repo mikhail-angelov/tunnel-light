@@ -23,6 +23,7 @@ class SshTunnelService : Service() {
         @Volatile var isRunning = false
     }
 
+    @Volatile private var shouldRun = false
     private var session: Session? = null
     private var proxyServer: Socks5ProxyServer? = null
 
@@ -39,32 +40,61 @@ class SshTunnelService : Service() {
         val user = intent.getStringExtra("user") ?: run { stopSelf(); return START_NOT_STICKY }
         val port = intent.getIntExtra("port", 22)
 
+        shouldRun = true
         updateNotification("Connecting to $host…")
         sendStatus("Connecting to $host…")
 
         Thread {
-            try {
-                val keyFile = File(filesDir, "id_ed25519")
-                val jsch = JSch()
-                jsch.addIdentity(keyFile.absolutePath)
+            val keyFile = File(filesDir, "id_ed25519")
+            while (shouldRun) {
+                var sess: Session? = null
+                var proxy: Socks5ProxyServer? = null
+                try {
+                    val jsch = JSch()
+                    jsch.addIdentity(keyFile.absolutePath)
 
-                val sess = jsch.getSession(user, host, port)
-                sess.setConfig("StrictHostKeyChecking", "no")
-                sess.setConfig("ServerAliveInterval", "30")
-                sess.setConfig("ServerAliveCountMax", "3")
-                sess.connect(15_000)
-                session = sess
+                    sess = jsch.getSession(user, host, port)
+                    sess.setConfig("StrictHostKeyChecking", "no")
+                    sess.setConfig("ServerAliveInterval", "30")
+                    sess.setConfig("ServerAliveCountMax", "3")
+                    sess.connect(15_000)
 
-                proxyServer = Socks5ProxyServer(sess)
-                proxyServer!!.start()
+                    session = sess
+                    proxy = Socks5ProxyServer(sess)
+                    proxyServer = proxy
+                    proxy.start()
 
-                isRunning = true
-                updateNotification("Connected — SOCKS5 on 127.0.0.1:1080")
-                sendStatus("Connected — SOCKS5 on 127.0.0.1:1080")
-            } catch (e: Exception) {
-                sendStatus("Error: ${e.message}")
-                stopSelf()
+                    isRunning = true
+                    updateNotification("Connected — SOCKS5 on 127.0.0.1:1080")
+                    sendStatus("Connected — SOCKS5 on 127.0.0.1:1080")
+
+                    // Block until session drops or stop is requested
+                    while (shouldRun && sess.isConnected()) {
+                        Thread.sleep(3_000)
+                    }
+                } catch (e: Exception) {
+                    if (shouldRun) {
+                        sendStatus("Error: ${e.message}")
+                    }
+                } finally {
+                    isRunning = false
+                    proxy?.stop()
+                    sess?.disconnect()
+                    session = null
+                    proxyServer = null
+                }
+
+                if (shouldRun) {
+                    sendStatus("Reconnecting in 5s…")
+                    updateNotification("Reconnecting…")
+                    Thread.sleep(5_000)
+                    if (shouldRun) {
+                        sendStatus("Connecting to $host…")
+                        updateNotification("Connecting to $host…")
+                    }
+                }
             }
+            stopSelf()
         }.start()
 
         return START_NOT_STICKY
@@ -73,6 +103,7 @@ class SshTunnelService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        shouldRun = false
         isRunning = false
         proxyServer?.stop()
         session?.disconnect()
@@ -85,10 +116,18 @@ class SshTunnelService : Service() {
     }
 
     private fun updateNotification(message: String) {
+        val tapIntent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            this, 0, tapIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
         val notification = Notification.Builder(this, "ssh")
             .setContentTitle("SSH Tunnel")
             .setContentText(message)
             .setSmallIcon(android.R.drawable.ic_menu_share)
+            .setContentIntent(pendingIntent)
             .setOngoing(true)
             .build()
         startForeground(1, notification)
