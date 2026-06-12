@@ -4,10 +4,10 @@ name: Build & Release
 # Tags v* (e.g. v1.2.0)  → build + sign + GitHub Release
 on:
   push:
-    branches: [main]
+    branches: [master]
     tags: ['v*']
   pull_request:
-    branches: [main]
+    branches: [master]
 
 permissions:
   contents: write   # needed to create GitHub Releases
@@ -35,9 +35,9 @@ jobs:
       # Decodes the base64 keystore secret into a file.
       # Skip this step if SIGNING_KEYSTORE secret is not set.
       - name: Decode keystore
-        if: ${{ secrets.SIGNING_KEYSTORE != '' }}
         env:
           SIGNING_KEYSTORE: ${{ secrets.SIGNING_KEYSTORE }}
+        if: env.SIGNING_KEYSTORE != ''
         run: echo "$SIGNING_KEYSTORE" | base64 -d > keystore.jks
 
       - name: Build release APK
