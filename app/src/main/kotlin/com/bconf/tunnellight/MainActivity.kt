@@ -1,0 +1,325 @@
+package com.bconf.tunnellight
+
+import android.content.BroadcastReceiver
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.net.Uri
+import android.os.Build
+import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
+import android.view.View
+import android.widget.Button
+import android.widget.EditText
+import android.widget.LinearLayout
+import android.widget.TextView
+import android.widget.Toast
+import androidx.activity.OnBackPressedCallback
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
+import androidx.appcompat.app.AppCompatActivity
+import org.bouncycastle.crypto.generators.Ed25519KeyPairGenerator
+import org.bouncycastle.crypto.params.Ed25519KeyGenerationParameters
+import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters
+import org.bouncycastle.crypto.params.Ed25519PublicKeyParameters
+import java.io.ByteArrayOutputStream
+import java.io.File
+import java.security.SecureRandom
+import java.util.Base64
+
+class MainActivity : AppCompatActivity() {
+
+    private lateinit var statusView: TextView
+    private lateinit var serverInput: EditText
+    private lateinit var publicKeyView: TextView
+    private lateinit var generatingLayout: LinearLayout
+    private lateinit var btnStart: Button
+    private lateinit var btnStop: Button
+    private lateinit var btnCopyKey: Button
+    private lateinit var btnRegenKey: Button
+
+    private val prefs by lazy { getSharedPreferences("tunnel", MODE_PRIVATE) }
+
+    private val statusReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            val msg = intent.getStringExtra(SshTunnelService.EXTRA_STATUS) ?: return
+            statusView.text = msg
+            when {
+                msg.startsWith("Connected") -> setTunnelUi(connected = true)
+                msg.startsWith("Connecting") -> setTunnelUi(connecting = true)
+                else -> setTunnelUi(connected = false)
+            }
+        }
+    }
+
+    private val requestNotificationPermission = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            checkBatteryOptimization()
+        } else {
+            statusView.text = "Notification permission denied — tunnel may not start on Android 14+"
+        }
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_main)
+
+        statusView = findViewById(R.id.status)
+        serverInput = findViewById(R.id.serverInput)
+        publicKeyView = findViewById(R.id.publicKey)
+        generatingLayout = findViewById(R.id.generatingLayout)
+        btnStart = findViewById(R.id.btnStart)
+        btnStop = findViewById(R.id.btnStop)
+        btnCopyKey = findViewById(R.id.btnCopyKey)
+        btnRegenKey = findViewById(R.id.btnRegenKey)
+
+        btnStart.isEnabled = false
+        btnStop.isEnabled = false
+        serverInput.setText(prefs.getString("server", ""))
+
+        generateKeyIfNeeded()
+        requestPermissionsIfNeeded()
+
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                if (SshTunnelService.isRunning) {
+                    moveTaskToBack(true)
+                } else {
+                    isEnabled = false
+                    onBackPressedDispatcher.onBackPressed()
+                }
+            }
+        })
+
+        btnStart.setOnClickListener {
+            val input = serverInput.text.toString().trim()
+            val (user, host, port) = parseServer(input) ?: run {
+                statusView.text = "Invalid format — use user@host or user@host:22"
+                return@setOnClickListener
+            }
+            prefs.edit().putString("server", input).apply()
+            startForegroundService(
+                Intent(this, SshTunnelService::class.java)
+                    .putExtra("user", user)
+                    .putExtra("host", host)
+                    .putExtra("port", port)
+            )
+        }
+
+        btnStop.setOnClickListener {
+            stopService(Intent(this, SshTunnelService::class.java))
+            statusView.text = "Stopped"
+            setTunnelUi(connected = false)
+        }
+
+        btnCopyKey.setOnClickListener {
+            val cm = getSystemService(ClipboardManager::class.java)
+            cm.setPrimaryClip(ClipData.newPlainText("ssh public key", publicKeyView.text))
+            Toast.makeText(this, "Copied to clipboard", Toast.LENGTH_SHORT).show()
+        }
+
+        btnRegenKey.setOnClickListener {
+            AlertDialog.Builder(this)
+                .setTitle("Regenerate key?")
+                .setMessage("This will create a new key pair. You will need to add the new public key to ~/.ssh/authorized_keys on your server — the tunnel will stop working until you do.")
+                .setPositiveButton("Regenerate") { _, _ -> forceRegenerateKey() }
+                .setNegativeButton("Cancel", null)
+                .show()
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        val filter = IntentFilter(SshTunnelService.ACTION_STATUS)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(statusReceiver, filter, RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            registerReceiver(statusReceiver, filter)
+        }
+        // Sync button state with service in case we returned from background
+        if (publicKeyView.visibility == View.VISIBLE) {
+            setTunnelUi(connected = SshTunnelService.isRunning)
+        }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        unregisterReceiver(statusReceiver)
+    }
+
+    private fun requestPermissionsIfNeeded() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
+                != android.content.pm.PackageManager.PERMISSION_GRANTED
+            ) {
+                requestNotificationPermission.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+                return
+            }
+        }
+        checkBatteryOptimization()
+    }
+
+    private fun checkBatteryOptimization() {
+        val pm = getSystemService(PowerManager::class.java)
+        if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+            AlertDialog.Builder(this)
+                .setTitle("Battery Optimization")
+                .setMessage("To keep the SSH tunnel running in the background, disable battery optimization for this app.")
+                .setPositiveButton("Open Settings") { _, _ ->
+                    startActivity(
+                        Intent(
+                            Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                            Uri.parse("package:$packageName")
+                        )
+                    )
+                }
+                .setNegativeButton("Skip", null)
+                .show()
+        }
+    }
+
+    private fun setTunnelUi(connected: Boolean = false, connecting: Boolean = false) {
+        btnStart.isEnabled = !connected && !connecting
+        btnStop.isEnabled = connected || connecting
+    }
+
+    private fun loadPublicKey() {
+        val pub = File(filesDir, "id_ed25519.pub")
+        if (pub.exists()) {
+            publicKeyView.text = pub.readText().trim()
+            publicKeyView.visibility = View.VISIBLE
+            generatingLayout.visibility = View.GONE
+            btnCopyKey.isEnabled = true
+            btnRegenKey.visibility = View.VISIBLE
+            setTunnelUi(connected = SshTunnelService.isRunning)
+        }
+    }
+
+    private fun forceRegenerateKey() {
+        btnRegenKey.visibility = View.GONE
+        btnCopyKey.isEnabled = false
+        publicKeyView.visibility = View.GONE
+        generatingLayout.visibility = View.VISIBLE
+
+        File(filesDir, "id_ed25519").delete()
+        File(filesDir, "id_ed25519.pub").delete()
+        generateKeyIfNeeded()
+    }
+
+    private fun generateKeyIfNeeded() {
+        Thread {
+            val keyFile = File(filesDir, "id_ed25519")
+            val pubFile = File(filesDir, "id_ed25519.pub")
+
+            val isValid = keyFile.exists() && pubFile.exists() &&
+                keyFile.readText().trimStart().startsWith("-----BEGIN OPENSSH PRIVATE KEY-----")
+
+            if (!isValid) {
+                runCatching {
+                    generateEd25519KeyPair(keyFile, pubFile, "ssh-tunnel@android")
+                }.onFailure { it.printStackTrace() }
+            }
+            runOnUiThread { loadPublicKey() }
+        }.start()
+    }
+
+    // --- ED25519 key generation using BouncyCastle directly ---
+
+    private fun generateEd25519KeyPair(privateFile: File, publicFile: File, comment: String) {
+        val gen = Ed25519KeyPairGenerator()
+        gen.init(Ed25519KeyGenerationParameters(SecureRandom()))
+        val kp = gen.generateKeyPair()
+        val priv = kp.private as Ed25519PrivateKeyParameters
+        val pub = kp.public as Ed25519PublicKeyParameters
+
+        val seed = priv.encoded    // 32-byte seed
+        val pubBytes = pub.encoded // 32-byte public key point
+
+        writeOpenSshPrivateKey(privateFile, seed, pubBytes, comment)
+        writeOpenSshPublicKey(publicFile, pubBytes, comment)
+    }
+
+    private fun writeOpenSshPrivateKey(file: File, seed: ByteArray, pubBytes: ByteArray, comment: String) {
+        val keyType = "ssh-ed25519".toByteArray()
+        val commentBytes = comment.toByteArray()
+        val privFull = seed + pubBytes  // OpenSSH stores seed||pubkey (64 bytes) as the private key
+
+        val pubKeyBlob = ByteArrayOutputStream().apply {
+            writeU32Bytes(keyType)
+            writeU32Bytes(pubBytes)
+        }.toByteArray()
+
+        val checkInt = SecureRandom().nextInt()
+        val privateBlob = ByteArrayOutputStream().apply {
+            writeU32(checkInt)
+            writeU32(checkInt)
+            writeU32Bytes(keyType)
+            writeU32Bytes(pubBytes)
+            writeU32Bytes(privFull)
+            writeU32Bytes(commentBytes)
+            var pad = 1; while (size() % 8 != 0) write(pad++)
+        }.toByteArray()
+
+        val keyData = ByteArrayOutputStream().apply {
+            write("openssh-key-v1 ".toByteArray())
+            writeU32Bytes("none".toByteArray()) // cipher
+            writeU32Bytes("none".toByteArray()) // kdf
+            writeU32(0)                          // no kdf options
+            writeU32(1)                          // 1 key
+            writeU32Bytes(pubKeyBlob)
+            writeU32Bytes(privateBlob)
+        }.toByteArray()
+
+        val b64 = Base64.getEncoder().encodeToString(keyData)
+        file.writeText(buildString {
+            append("-----BEGIN OPENSSH PRIVATE KEY-----\n")
+            b64.chunked(70).forEach { append(it).append('\n') }
+            append("-----END OPENSSH PRIVATE KEY-----\n")
+        })
+    }
+
+    private fun writeOpenSshPublicKey(file: File, pubBytes: ByteArray, comment: String) {
+        val keyType = "ssh-ed25519".toByteArray()
+        val blob = ByteArrayOutputStream().apply {
+            writeU32Bytes(keyType)
+            writeU32Bytes(pubBytes)
+        }.toByteArray()
+        file.writeText("ssh-ed25519 ${Base64.getEncoder().encodeToString(blob)} $comment\n")
+    }
+
+    private fun ByteArrayOutputStream.writeU32(v: Int) {
+        write(v ushr 24 and 0xFF); write(v ushr 16 and 0xFF)
+        write(v ushr 8 and 0xFF); write(v and 0xFF)
+    }
+
+    private fun ByteArrayOutputStream.writeU32Bytes(b: ByteArray) {
+        writeU32(b.size); write(b)
+    }
+
+    // --- end key generation ---
+
+    private fun parseServer(input: String): Triple<String, String, Int>? {
+        val atIdx = input.indexOf('@')
+        if (atIdx < 1) return null
+        val user = input.substring(0, atIdx)
+        val hostPart = input.substring(atIdx + 1)
+        val colonIdx = hostPart.lastIndexOf(':')
+        val host: String
+        val port: Int
+        if (colonIdx >= 0) {
+            host = hostPart.substring(0, colonIdx)
+            port = hostPart.substring(colonIdx + 1).toIntOrNull() ?: 22
+        } else {
+            host = hostPart
+            port = 22
+        }
+        if (host.isEmpty() || user.isEmpty()) return null
+        return Triple(user, host, port)
+    }
+}
