@@ -142,9 +142,15 @@ class MainActivity : AppCompatActivity() {
             @Suppress("UnspecifiedRegisterReceiverFlag")
             registerReceiver(statusReceiver, filter)
         }
-        // Sync button state with service in case we returned from background
+        // Sync UI with service state in case we returned from background
         if (publicKeyView.visibility == View.VISIBLE) {
-            setTunnelUi(connected = SshTunnelService.isRunning)
+            val running = SshTunnelService.isRunning
+            val last = SshTunnelService.lastStatus
+            if (last.isNotEmpty()) statusView.text = last
+            setTunnelUi(
+                connected = running,
+                connecting = !running && last.startsWith("Connecting")
+            )
         }
     }
 

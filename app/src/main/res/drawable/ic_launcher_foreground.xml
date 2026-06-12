@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Stone/concrete tunnel surround -->
+    <path
+        android:fillColor="#546E7A"
+        android:pathData="M22,92 L22,70 A32,28 0 0,0 86,70 L86,92 Z" />
+
+    <!-- Tunnel opening – dark interior -->
+    <path
+        android:fillColor="#0D1B2A"
+        android:pathData="M30,92 L30,70 A24,20 0 0,0 78,70 L78,92 Z" />
+
+    <!-- Perspective lines inside tunnel -->
+    <path
+        android:strokeColor="#162030"
+        android:strokeWidth="0.8"
+        android:pathData="M30,92 L46,76 M78,92 L62,76 M54,70 L44,92 M54,70 L64,92" />
+
+    <!-- Glow at far end of tunnel -->
+    <path
+        android:fillColor="#FFF9C4"
+        android:fillAlpha="0.45"
+        android:pathData="M54,78 A10,10 0 1,0 54,58 A10,10 0 1,0 54,78 Z" />
+
+    <!-- Bright core at tunnel end -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillAlpha="0.85"
+        android:pathData="M54,71 A4,4 0 1,0 54,63 A4,4 0 1,0 54,71 Z" />
+
+    <!-- Spark at tunnel mouth (small, warm) -->
+    <path
+        android:fillColor="#FFF9C4"
+        android:pathData="M54,63 L55.1,66.9 L59,68 L55.1,69.1 L54,73 L52.9,69.1 L49,68 L52.9,66.9 Z" />
+
+    <!-- Top-centre spark (large, brightest) -->
+    <path
+        android:fillColor="#FFD54F"
+        android:pathData="M54,6 L55.9,11.1 L62,14 L55.9,16.9 L54,22 L52.1,16.9 L46,14 L52.1,11.1 Z" />
+
+    <!-- Upper-right spark (medium) -->
+    <path
+        android:fillColor="#FFB300"
+        android:pathData="M80,20 L81.3,24.7 L86,26 L81.3,27.3 L80,32 L78.7,27.3 L74,26 L78.7,24.7 Z" />
+
+    <!-- Upper-left spark (medium) -->
+    <path
+        android:fillColor="#FFB300"
+        android:pathData="M28,20 L29.3,24.7 L34,26 L29.3,27.3 L28,32 L26.7,27.3 L22,26 L26.7,24.7 Z" />
+
+    <!-- Right-side spark (small) -->
+    <path
+        android:fillColor="#FFF176"
+        android:pathData="M91,43 L91.8,45.8 L94.5,46.5 L91.8,47.2 L91,50 L90.2,47.2 L87.5,46.5 L90.2,45.8 Z" />
+
+    <!-- Left-side spark (small) -->
+    <path
+        android:fillColor="#FFF176"
+        android:pathData="M17,43 L17.8,45.8 L20.5,46.5 L17.8,47.2 L17,50 L16.2,47.2 L13.5,46.5 L16.2,45.8 Z" />
+
+</vector>

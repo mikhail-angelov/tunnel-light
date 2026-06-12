@@ -21,6 +21,7 @@ class SshTunnelService : Service() {
         const val ACTION_STATUS = "com.bconf.tunnellight.STATUS"
         const val EXTRA_STATUS = "status"
         @Volatile var isRunning = false
+        @Volatile var lastStatus = ""
     }
 
     @Volatile private var shouldRun = false
@@ -105,6 +106,7 @@ class SshTunnelService : Service() {
     override fun onDestroy() {
         shouldRun = false
         isRunning = false
+        lastStatus = ""
         proxyServer?.stop()
         session?.disconnect()
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
@@ -112,6 +114,7 @@ class SshTunnelService : Service() {
     }
 
     private fun sendStatus(message: String) {
+        lastStatus = message
         sendBroadcast(Intent(ACTION_STATUS).putExtra(EXTRA_STATUS, message))
     }
 
