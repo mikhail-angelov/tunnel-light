@@ -18,6 +18,7 @@ Download the latest `app-release.apk` from the [Releases](../../releases) page a
 ## First launch
 
 On first launch the app generates an **ED25519 key pair** stored privately on your device. The public key is shown at the bottom of the screen — you need to copy it to your server before the tunnel will connect.
+<img width="728" height="808" alt="image" src="https://github.com/user-attachments/assets/e37d9cdc-07ea-4cfa-9808-e78ceee99d8b" />
 
 ---
 
@@ -74,6 +75,7 @@ Once connected, configure any app that supports SOCKS5 to use:
 **Telegram:**  
 Settings → Data and Storage → Proxy Settings → Add Proxy → SOCKS5  
 Host `127.0.0.1`, port `1080`, no username or password.
+<img width="1258" height="854" alt="image" src="https://github.com/user-attachments/assets/ee1a9d30-c423-4049-863e-ed22dd631620" />
 
 **Firefox for Android:**  
 Settings → General → Network Settings → Manual proxy → SOCKS5, host `127.0.0.1`, port `1080`.
