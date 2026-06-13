@@ -33,6 +33,7 @@ class SshTunnelService : Service() {
         const val EXTRA_STATUS = "status"
         @Volatile var isRunning = false
         @Volatile var lastStatus = ""
+        @Volatile var lastNetworkStatus = ""
     }
 
     @Volatile private var shouldRun = false
@@ -53,6 +54,7 @@ class SshTunnelService : Service() {
         override fun onAvailable(network: Network) {
             val wasDown = !networkAvailable
             networkAvailable = true
+            networkStatusText("📶 Connected")
             consecutiveFailures = 0
             if (wasDown && shouldRun) {
                 sendStatus("Network available — reconnecting…")
@@ -62,6 +64,7 @@ class SshTunnelService : Service() {
 
         override fun onLost(network: Network) {
             networkAvailable = false
+            networkStatusText("⛔ No internet")
             if (shouldRun) {
                 isRunning = false
                 sendStatus("Network lost — waiting…")
@@ -72,6 +75,7 @@ class SshTunnelService : Service() {
 
         override fun onUnavailable() {
             networkAvailable = false
+            networkStatusText("⛔ No internet")
             if (shouldRun) {
                 sendStatus("No network available — waiting…")
                 connectionThread?.interrupt()
@@ -102,7 +106,8 @@ class SshTunnelService : Service() {
         isRunning = false
         backoffSec = 1
         consecutiveFailures = 0
-        networkAvailable = true
+        networkAvailable = isNetworkAvailable()
+        networkStatusText(if (networkAvailable) "\uD83D\uDCF6 Connected" else "\u26D4 No internet")
 
         acquireLocks()
         registerNetworkCallback()
@@ -271,6 +276,10 @@ class SshTunnelService : Service() {
     private fun sendStatus(message: String) {
         lastStatus = message
         sendBroadcast(Intent(ACTION_STATUS).putExtra(EXTRA_STATUS, message))
+    }
+
+    private fun networkStatusText(text: String) {
+        lastNetworkStatus = text
     }
 
     private fun updateNotification(message: String) {

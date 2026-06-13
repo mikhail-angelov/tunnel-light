@@ -6,10 +6,6 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.net.ConnectivityManager
-import android.net.Network
-import android.net.NetworkCapabilities
-import android.net.NetworkRequest
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -52,6 +48,11 @@ class MainActivity : AppCompatActivity() {
         override fun onReceive(context: Context, intent: Intent) {
             val msg = intent.getStringExtra(SshTunnelService.EXTRA_STATUS) ?: return
             statusView.text = msg
+            networkStatusView.text = SshTunnelService.lastNetworkStatus
+            networkStatusView.setTextColor(
+                if (SshTunnelService.lastNetworkStatus.contains("\u26D4"))
+                    0xFFCC4444.toInt() else 0xFF44AA44.toInt()
+            )
             when {
                 msg.startsWith("Connected") -> setTunnelUi(connected = true)
                 msg.startsWith("Connecting") -> setTunnelUi(connecting = true)
@@ -70,17 +71,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
-        override fun onAvailable(network: Network) {
-            updateNetworkStatus()
-        }
-        override fun onLost(network: Network) {
-            updateNetworkStatus()
-        }
-        override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
-            updateNetworkStatus()
-        }
-    }
+    // ── Network status is read from SshTunnelService.lastNetworkStatus ──
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -160,8 +151,12 @@ class MainActivity : AppCompatActivity() {
             @Suppress("UnspecifiedRegisterReceiverFlag")
             registerReceiver(statusReceiver, filter)
         }
-        registerNetworkCallback()
-        updateNetworkStatus()
+        // Read latest network status from service
+        networkStatusView.text = SshTunnelService.lastNetworkStatus
+        networkStatusView.setTextColor(
+            if (SshTunnelService.lastNetworkStatus.contains("\u26D4"))
+                0xFFCC4444.toInt() else 0xFF44AA44.toInt()
+        )
         // Sync UI with service state in case we returned from background
         if (publicKeyView.visibility == View.VISIBLE) {
             val running = SshTunnelService.isRunning
@@ -176,7 +171,6 @@ class MainActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
-        unregisterNetworkCallback()
         unregisterReceiver(statusReceiver)
     }
 
@@ -216,55 +210,7 @@ class MainActivity : AppCompatActivity() {
         btnStop.isEnabled = connected || connecting
     }
 
-    // ── Network status ──
-
-    private fun registerNetworkCallback() {
-        runCatching {
-            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-            cm.registerNetworkCallback(
-                NetworkRequest.Builder()
-                    .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                    .build(),
-                networkCallback
-            )
-        }
-    }
-
-    private fun unregisterNetworkCallback() {
-        runCatching {
-            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-            cm.unregisterNetworkCallback(networkCallback)
-        }
-    }
-
-    private fun updateNetworkStatus() {
-        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-        val activeNetwork = cm.activeNetwork ?: run {
-            networkStatusView.text = "\u26D4 No internet"
-            networkStatusView.setTextColor(0xFFCC4444.toInt())
-            return
-        }
-        val caps = cm.getNetworkCapabilities(activeNetwork) ?: run {
-            networkStatusView.text = "\u26D4 No internet"
-            networkStatusView.setTextColor(0xFFCC4444.toInt())
-            return
-        }
-        val (icon, label) = when {
-            caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "\uD83D\uDCF6" to "WiFi"
-            caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> {
-                val type = when {
-                    caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) -> ""
-                    else -> SshTunnelLogic.getCellularGenerationName(caps.linkDownstreamBandwidthKbps)
-                }
-                "\uD83D\uDCF1" to "Mobile$type"
-            }
-            caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "\uD83D\uDDA5" to "Ethernet"
-            caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) -> "\uD83D\uDD10" to "VPN"
-            else -> "\uD83C\uDF10" to "Internet"
-        }
-        networkStatusView.text = "$icon $label"
-        networkStatusView.setTextColor(0xFF44AA44.toInt())
-    }
+    // Network status is read from SshTunnelService.lastNetworkStatus (see onResume + statusReceiver)
 
     private fun loadPublicKey() {
         val pub = File(filesDir, "id_ed25519.pub")
