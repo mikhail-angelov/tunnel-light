@@ -32,6 +32,9 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x gradlew
 
+      - name: Run unit tests
+        run: ./gradlew testDebugUnitTest
+
       # Decodes the base64 keystore secret into a file.
       # Skip this step if SIGNING_KEYSTORE secret is not set.
       - name: Decode keystore
