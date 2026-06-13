@@ -58,6 +58,7 @@ class SshTunnelService : Service() {
 
     @Volatile private var backoffSec = 1
     @Volatile private var consecutiveFailures = 0
+    @Volatile private var jumpSession: Session? = null
 
     // ── Network callbacks ────────────────────────────────────────────
     // One callback per transport type so Android does the classification
@@ -163,7 +164,7 @@ class SshTunnelService : Service() {
         val jumpHost = intent.getStringExtra("jump_host")
         val jumpPort = intent.getIntExtra("jump_port", 22)
 
-        val label = if (jumpUser != null) "$jumpUser@$jumpHost → $user@$host" else "$user@$host"
+        val label = if (jumpUser != null && jumpHost != null) "$jumpUser@$jumpHost → $user@$host" else "$user@$host"
 
         if (shouldRun) return START_REDELIVER_INTENT
 
@@ -208,33 +209,32 @@ class SshTunnelService : Service() {
                     val jsch = JSch()
                     jsch.addIdentity(keyFile.absolutePath)
 
-                    // Connect jump host first if chaining
+                    // Connect jump host first if chaining.
+                    // Assign jumpSess BEFORE connect() so the finally block can
+                    // always disconnect it even if connect() throws mid-handshake.
                     if (jumpUser != null && jumpHost != null) {
-                        jumpSess = jsch.getSession(jumpUser, jumpHost, jumpPort).apply {
-                            setConfig("StrictHostKeyChecking", "no")
-                            setConfig("TCPKeepAlive", "yes")
-                            setConfig("ServerAliveInterval", "20")
-                            setConfig("ServerAliveCountMax", "3")
-                            if (connectVia != null) {
-                                setSocketFactory(NetworkBoundSocketFactory(connectVia))
-                            }
-                            connect(15_000)
-                        }
+                        val js = jsch.getSession(jumpUser, jumpHost, jumpPort)
+                        js.setConfig("StrictHostKeyChecking", "no")
+                        js.setConfig("TCPKeepAlive", "yes")
+                        js.setConfig("ServerAliveInterval", "20")
+                        js.setConfig("ServerAliveCountMax", "3")
+                        if (connectVia != null) js.setSocketFactory(NetworkBoundSocketFactory(connectVia))
+                        jumpSess = js
+                        jumpSession = js
+                        js.connect(15_000)
                     }
 
-                    // Connect target (via jump proxy if chaining, else direct)
-                    sess = jsch.getSession(user, host, port).apply {
-                        setConfig("StrictHostKeyChecking", "no")
-                        setConfig("TCPKeepAlive", "yes")
-                        setConfig("ServerAliveInterval", "20")
-                        setConfig("ServerAliveCountMax", "3")
-                        if (jumpSess != null) {
-                            setProxy(JumpProxy(jumpSess))
-                        } else if (connectVia != null) {
-                            setSocketFactory(NetworkBoundSocketFactory(connectVia))
-                        }
-                        connect(15_000)
-                    }
+                    // Connect target (via jump proxy if chaining, else direct).
+                    // Assign sess BEFORE connect() for the same reason.
+                    val s = jsch.getSession(user, host, port)
+                    s.setConfig("StrictHostKeyChecking", "no")
+                    s.setConfig("TCPKeepAlive", "yes")
+                    s.setConfig("ServerAliveInterval", "20")
+                    s.setConfig("ServerAliveCountMax", "3")
+                    if (jumpSess != null) s.setProxy(JumpProxy(jumpSess!!))
+                    else if (connectVia != null) s.setSocketFactory(NetworkBoundSocketFactory(connectVia))
+                    sess = s
+                    s.connect(15_000)
 
                     session = sess
                     proxy = Socks5ProxyServer(sess)
@@ -292,6 +292,7 @@ class SshTunnelService : Service() {
                     proxy?.stop()
                     sess?.disconnect()
                     jumpSess?.disconnect()
+                    jumpSession = null
                     session = null
                     proxyServer = null
                 }
@@ -436,6 +437,7 @@ class SshTunnelService : Service() {
         connectionThread?.interrupt()
         proxyServer?.stop()
         session?.disconnect()
+        jumpSession?.disconnect()
         unregisterNetworkCallback()
         releaseLocks()
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
@@ -473,7 +475,7 @@ private class JumpProxy(private val session: Session) : Proxy {
         ch.setHost(host)
         ch.setPort(port)
         ch.setOrgIPAddress("127.0.0.1")
-        ch.setOrgPort(0)
+        ch.setOrgPort(1)  // RFC 4254 §7.2: originator port must be non-zero
         ch.connect(timeout)
         channel = ch
         inputStream = ch.inputStream

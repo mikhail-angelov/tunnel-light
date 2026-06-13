@@ -49,8 +49,8 @@ object SshTunnelLogic {
      * Split input by chain separator: ` → `, ` -> `, or ` > `.
      */
     private fun splitChain(input: String): List<String> {
-        // Try Unicode arrow first, then ASCII alternatives
-        val separators = listOf(" → ", " -> ", " > ", "=>")
+        // Try Unicode arrow first, then ASCII alternatives (all require surrounding spaces)
+        val separators = listOf(" → ", " -> ", " > ")
         for (sep in separators) {
             val parts = input.split(sep, limit = 2)
             if (parts.size == 2) return parts
@@ -83,6 +83,7 @@ object SshTunnelLogic {
 
     // ── Error classification ────────────────────────────────────────
 
+    /** Returns true if the error is permanent and retrying is pointless (e.g. auth failure). */
     fun isFatalSshError(message: String?): Boolean {
         val msg = message ?: return false
         return msg.contains("Auth fail", ignoreCase = true) ||
@@ -91,6 +92,7 @@ object SshTunnelLogic {
                 (msg.contains("key", ignoreCase = true) && msg.contains("rejected", ignoreCase = true))
     }
 
+    /** Returns true if the error is likely caused by network flakiness and retrying makes sense. */
     fun isLikelyTransient(message: String?): Boolean {
         if (message == null) return true
         val m = message.lowercase()
@@ -106,6 +108,7 @@ object SshTunnelLogic {
                 m.contains("socket is closed")
     }
 
+    /** Returns a human-readable error string suitable for display to the user. */
     fun describeError(message: String?, host: String, attempts: Int): String {
         val msg = message ?: "Unknown error"
         return when {
@@ -135,6 +138,7 @@ object SshTunnelLogic {
 
     // ── Exponential backoff ─────────────────────────────────────────
 
+    /** Computes the next backoff delay: starts at 1 s, doubles each call, caps at 60 s. */
     fun backoff(currentBackoffSec: Int): BackoffResult {
         val delayMs = (currentBackoffSec * 1000L).coerceAtMost(60_000L)
         val nextBackoffSec = (currentBackoffSec * 2).coerceAtMost(60)
@@ -143,6 +147,7 @@ object SshTunnelLogic {
 
     // ── Cellular generation ─────────────────────────────────────────
 
+    /** Best-effort cellular generation label (2G/3G/4G/5G) from link downstream speed. */
     fun getCellularGenerationName(downSpeedKbps: Int): String {
         return when {
             downSpeedKbps >= 100_000 -> " (5G)"

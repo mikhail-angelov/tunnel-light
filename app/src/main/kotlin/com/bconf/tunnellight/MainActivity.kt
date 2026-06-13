@@ -92,11 +92,24 @@ class MainActivity : AppCompatActivity() {
         serverInput.setText(prefs.getString("server", ""))
         jumpInput.setText(prefs.getString("jump", ""))
 
-        // Toggle jump host field
+        // Toggle jump host field; hiding also clears it so the tunnel uses no jump host
         btnToggleJump.setOnClickListener {
             val shown = jumpInput.visibility == View.VISIBLE
-            jumpInput.visibility = if (shown) View.GONE else View.VISIBLE
-            btnToggleJump.text = if (shown) "+" else "\u2212"
+            if (shown) {
+                jumpInput.text.clear()
+                jumpInput.visibility = View.GONE
+                btnToggleJump.text = "+"
+            } else {
+                jumpInput.visibility = View.VISIBLE
+                btnToggleJump.text = "\u2212"
+                jumpInput.requestFocus()
+            }
+        }
+
+        // Show jump field on start if a jump host was previously saved
+        if (prefs.getString("jump", "").isNullOrEmpty().not()) {
+            jumpInput.visibility = View.VISIBLE
+            btnToggleJump.text = "\u2212"
         }
 
         generateKeyIfNeeded()
@@ -120,12 +133,16 @@ class MainActivity : AppCompatActivity() {
                 return@setOnClickListener
             }
             val jumpStr = jumpInput.text.toString().trim()
-            val jump = if (jumpStr.isNotEmpty()) {
+            val jumpFromField = if (jumpStr.isNotEmpty()) {
                 SshTunnelLogic.parseServer(jumpStr) ?: run {
                     statusView.text = "Invalid jump format — use user@host:port"
                     return@setOnClickListener
                 }
             } else null
+            // jumpInput takes priority; fall back to chain syntax in serverInput
+            val eJumpUser = jumpFromField?.user ?: target.jump?.user
+            val eJumpHost = jumpFromField?.host ?: target.jump?.host
+            val eJumpPort = jumpFromField?.port ?: target.jump?.port ?: 22
 
             prefs.edit().putString("server", targetStr).putString("jump", jumpStr).apply()
             startForegroundService(
@@ -133,9 +150,9 @@ class MainActivity : AppCompatActivity() {
                     .putExtra("user", target.user)
                     .putExtra("host", target.host)
                     .putExtra("port", target.port)
-                    .putExtra("jump_user", jump?.user)
-                    .putExtra("jump_host", jump?.host)
-                    .putExtra("jump_port", jump?.port ?: 22)
+                    .putExtra("jump_user", eJumpUser)
+                    .putExtra("jump_host", eJumpHost)
+                    .putExtra("jump_port", eJumpPort)
             )
         }
 
