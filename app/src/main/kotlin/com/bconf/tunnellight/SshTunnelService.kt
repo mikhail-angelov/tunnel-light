@@ -405,8 +405,9 @@ private class Socks5ProxyServer(
     private fun pump(src: InputStream, dst: OutputStream, stopped: AtomicBoolean) {
         try {
             val buf = ByteArray(8192)
-            var n: Int
-            while (!stopped.get() && src.read(buf).also { n = it } != -1) {
+            while (!stopped.get()) {
+                val n = src.read(buf)
+                if (n == -1) break
                 dst.write(buf, 0, n)
                 dst.flush()
             }
