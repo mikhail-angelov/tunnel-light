@@ -52,6 +52,14 @@
             android:layout_height="wrap_content"
             android:text="Stopped"
             android:textSize="14sp"
+            android:layout_marginBottom="4dp" />
+
+        <TextView
+            android:id="@+id/networkStatus"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textSize="11sp"
+            android:textColor="#888888"
             android:layout_marginBottom="32dp" />
 
         <View
