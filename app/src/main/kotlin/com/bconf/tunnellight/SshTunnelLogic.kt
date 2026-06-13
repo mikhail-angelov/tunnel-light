@@ -52,6 +52,7 @@ object SshTunnelLogic {
         val m = message.lowercase()
         return m.contains("connection refused") ||
                 m.contains("timeout") ||
+                m.contains("timed out") ||
                 m.contains("econnrefused") ||
                 m.contains("econnreset") ||
                 m.contains("econnaborted") ||
