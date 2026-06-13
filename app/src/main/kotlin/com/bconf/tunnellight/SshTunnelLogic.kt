@@ -36,11 +36,10 @@ object SshTunnelLogic {
      */
     fun isFatalSshError(message: String?): Boolean {
         val msg = message ?: return false
-        return msg.contains("Auth fail") ||
-                msg.contains("USERAUTH fail") ||
-                msg.contains("invalid privatekey") ||
-                msg.contains("invalid privatekey file") ||
-                (msg.contains("key") && msg.contains("rejected"))
+        return msg.contains("Auth fail", ignoreCase = true) ||
+                msg.contains("USERAUTH fail", ignoreCase = true) ||
+                msg.contains("invalid privatekey", ignoreCase = true) ||
+                (msg.contains("key", ignoreCase = true) && msg.contains("rejected", ignoreCase = true))
     }
 
     /**
@@ -77,7 +76,7 @@ object SshTunnelLogic {
                 "Authentication failed \u2014 check username and public key on server"
             msg.contains("Connection refused", ignoreCase = true) ->
                 "Connection refused \u2014 is SSH running on $host?"
-            msg.contains("UnknownHost", ignoreCase = true) ->
+            msg == host || msg.startsWith("$host:") || msg.contains("UnknownHost", ignoreCase = true) ->
                 "Cannot resolve $host \u2014 check server address or DNS"
             msg.contains("timeout", ignoreCase = true) ->
                 "Connection timed out \u2014 check server availability"

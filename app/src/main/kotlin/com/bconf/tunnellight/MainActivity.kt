@@ -48,11 +48,7 @@ class MainActivity : AppCompatActivity() {
         override fun onReceive(context: Context, intent: Intent) {
             val msg = intent.getStringExtra(SshTunnelService.EXTRA_STATUS) ?: return
             statusView.text = msg
-            networkStatusView.text = SshTunnelService.lastNetworkStatus
-            networkStatusView.setTextColor(
-                if (SshTunnelService.lastNetworkStatus.contains("\u26D4"))
-                    0xFFCC4444.toInt() else 0xFF44AA44.toInt()
-            )
+            updateNetworkStatusView()
             when {
                 msg.startsWith("Connected") -> setTunnelUi(connected = true)
                 msg.startsWith("Connecting") -> setTunnelUi(connecting = true)
@@ -152,11 +148,7 @@ class MainActivity : AppCompatActivity() {
             registerReceiver(statusReceiver, filter)
         }
         // Read latest network status from service
-        networkStatusView.text = SshTunnelService.lastNetworkStatus
-        networkStatusView.setTextColor(
-            if (SshTunnelService.lastNetworkStatus.contains("\u26D4"))
-                0xFFCC4444.toInt() else 0xFF44AA44.toInt()
-        )
+        updateNetworkStatusView()
         // Sync UI with service state in case we returned from background
         if (publicKeyView.visibility == View.VISIBLE) {
             val running = SshTunnelService.isRunning
@@ -210,7 +202,15 @@ class MainActivity : AppCompatActivity() {
         btnStop.isEnabled = connected || connecting
     }
 
-    // Network status is read from SshTunnelService.lastNetworkStatus (see onResume + statusReceiver)
+    private fun updateNetworkStatusView() {
+        val status = SshTunnelService.lastNetworkStatus
+        networkStatusView.text = status
+        if (status.isNotEmpty()) {
+            networkStatusView.setTextColor(
+                if (status.contains("⛔")) 0xFFCC4444.toInt() else 0xFF44AA44.toInt()
+            )
+        }
+    }
 
     private fun loadPublicKey() {
         val pub = File(filesDir, "id_ed25519.pub")

@@ -45,8 +45,8 @@ class SshTunnelService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
 
-    private var backoffSec = 1
-    private var consecutiveFailures = 0
+    @Volatile private var backoffSec = 1
+    @Volatile private var consecutiveFailures = 0
 
     // ── Network callback (always active while service runs) ──────────
 
@@ -173,23 +173,31 @@ class SshTunnelService : Service() {
                     // Loop re-evaluates shouldRun and networkAvailable
                 } catch (e: JSchException) {
                     consecutiveFailures++
-                    val msg = SshTunnelLogic.describeError(e.message, host, consecutiveFailures)
-                    sendStatus(msg); updateNotification(msg)
                     if (SshTunnelLogic.isFatalSshError(e.message)) {
                         shouldRun = false
                     }
+                    if (shouldRun) {
+                        val msg = SshTunnelLogic.describeError(e.message, host, consecutiveFailures)
+                        sendStatus(msg); updateNotification(msg)
+                    }
                 } catch (e: UnknownHostException) {
                     consecutiveFailures++
-                    val msg = SshTunnelLogic.describeError(e.message, host, consecutiveFailures)
-                    sendStatus(msg); updateNotification(msg)
+                    if (shouldRun) {
+                        val msg = SshTunnelLogic.describeError(e.message, host, consecutiveFailures)
+                        sendStatus(msg); updateNotification(msg)
+                    }
                 } catch (e: SocketTimeoutException) {
                     consecutiveFailures++
-                    val msg = SshTunnelLogic.describeError(e.message, host, consecutiveFailures)
-                    sendStatus(msg); updateNotification(msg)
+                    if (shouldRun) {
+                        val msg = SshTunnelLogic.describeError(e.message, host, consecutiveFailures)
+                        sendStatus(msg); updateNotification(msg)
+                    }
                 } catch (e: Exception) {
                     consecutiveFailures++
-                    val msg = SshTunnelLogic.describeError(e.message, host, consecutiveFailures)
-                    sendStatus(msg); updateNotification(msg)
+                    if (shouldRun) {
+                        val msg = SshTunnelLogic.describeError(e.message, host, consecutiveFailures)
+                        sendStatus(msg); updateNotification(msg)
+                    }
                 } finally {
                     isRunning = false
                     proxy?.stop()
@@ -223,7 +231,7 @@ class SshTunnelService : Service() {
 
     private fun waitForNetwork() {
         while (shouldRun && !networkAvailable) {
-            try { Thread.sleep(1_000) } catch (_: InterruptedException) { return }
+            try { Thread.sleep(1_000) } catch (_: InterruptedException) { /* re-check condition */ }
         }
     }
 
@@ -233,9 +241,7 @@ class SshTunnelService : Service() {
         runCatching {
             val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
             cm.registerNetworkCallback(
-                NetworkRequest.Builder()
-                    .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                    .build(),
+                NetworkRequest.Builder().build(),
                 networkCallback
             )
         }

@@ -73,8 +73,18 @@ class SshTunnelLogicTest {
     }
 
     @Test
+    fun `fatal auth fail lowercase`() {
+        assertTrue(SshTunnelLogic.isFatalSshError("auth fail"))
+    }
+
+    @Test
     fun `fatal USERAUTH fail`() {
         assertTrue(SshTunnelLogic.isFatalSshError("USERAUTH fail"))
+    }
+
+    @Test
+    fun `fatal USERAUTH fail lowercase`() {
+        assertTrue(SshTunnelLogic.isFatalSshError("userauth fail"))
     }
 
     @Test
@@ -85,6 +95,11 @@ class SshTunnelLogicTest {
     @Test
     fun `fatal key was rejected`() {
         assertTrue(SshTunnelLogic.isFatalSshError("key was rejected by the server"))
+    }
+
+    @Test
+    fun `fatal key was rejected mixed case`() {
+        assertTrue(SshTunnelLogic.isFatalSshError("Key was Rejected by the server"))
     }
 
     @Test
@@ -156,7 +171,21 @@ class SshTunnelLogicTest {
     }
 
     @Test
-    fun `describe unknown host`() {
+    fun `describe unknown host via UnknownHostException message format`() {
+        // UnknownHostException.message is the bare hostname (JVM behavior)
+        val msg = SshTunnelLogic.describeError("srv.io", "srv.io", 1)
+        assertTrue(msg.contains("Cannot resolve"))
+    }
+
+    @Test
+    fun `describe unknown host with colon suffix`() {
+        // Some JVM versions produce "hostname: cause"
+        val msg = SshTunnelLogic.describeError("srv.io: Name or service not known", "srv.io", 1)
+        assertTrue(msg.contains("Cannot resolve"))
+    }
+
+    @Test
+    fun `describe unknown host legacy UnknownHost string`() {
         val msg = SshTunnelLogic.describeError("UnknownHost: srv.io", "srv.io", 1)
         assertTrue(msg.contains("Cannot resolve"))
     }
