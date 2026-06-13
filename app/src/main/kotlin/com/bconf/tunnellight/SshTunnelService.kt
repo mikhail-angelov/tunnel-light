@@ -1,13 +1,12 @@
 package com.bconf.tunnellight
 
 import android.app.*
-import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
@@ -32,12 +31,12 @@ class SshTunnelService : Service() {
     companion object {
         const val ACTION_STATUS = "com.bconf.tunnellight.STATUS"
         const val EXTRA_STATUS = "status"
-        const val ACTION_NETWORK_AVAILABLE = "com.bconf.tunnellight.NETWORK_AVAILABLE"
         @Volatile var isRunning = false
         @Volatile var lastStatus = ""
     }
 
     @Volatile private var shouldRun = false
+    @Volatile private var networkAvailable = true
     private var session: Session? = null
     private var proxyServer: Socks5ProxyServer? = null
     private var connectionThread: Thread? = null
@@ -47,7 +46,38 @@ class SshTunnelService : Service() {
 
     private var backoffSec = 1
     private var consecutiveFailures = 0
-    private var networkWakeReceiver: BroadcastReceiver? = null
+
+    // ── Network callback (always active while service runs) ──────────
+
+    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) {
+            val wasDown = !networkAvailable
+            networkAvailable = true
+            consecutiveFailures = 0
+            if (wasDown && shouldRun) {
+                sendStatus("Network available — reconnecting…")
+                connectionThread?.interrupt()
+            }
+        }
+
+        override fun onLost(network: Network) {
+            networkAvailable = false
+            if (shouldRun) {
+                isRunning = false
+                sendStatus("Network lost — waiting…")
+                updateNotification("Waiting for network…")
+                connectionThread?.interrupt()
+            }
+        }
+
+        override fun onUnavailable() {
+            networkAvailable = false
+            if (shouldRun) {
+                sendStatus("No network available — waiting…")
+                connectionThread?.interrupt()
+            }
+        }
+    }
 
     // ── Lifecycle ───────────────────────────────────────────────────
 
@@ -72,9 +102,10 @@ class SshTunnelService : Service() {
         isRunning = false
         backoffSec = 1
         consecutiveFailures = 0
+        networkAvailable = true
 
         acquireLocks()
-        registerNetworkWakeReceiver()
+        registerNetworkCallback()
 
         updateNotification("Connecting to $host…")
         sendStatus("Connecting to $host…")
@@ -85,7 +116,7 @@ class SshTunnelService : Service() {
 
             while (shouldRun) {
                 // Guard: no network → wait until it comes back
-                if (!isNetworkAvailable() && shouldRun) {
+                if (!networkAvailable && shouldRun) {
                     updateNotification("Waiting for network…")
                     sendStatus("Network unavailable — waiting…")
                     waitForNetwork()
@@ -163,7 +194,7 @@ class SshTunnelService : Service() {
                 }
 
                 // Backoff sleep before next reconnect attempt
-                if (shouldRun) {
+                if (shouldRun && networkAvailable) {
                     val result = SshTunnelLogic.backoff(backoffSec)
                     backoffSec = result.nextBackoffSec
                     try { Thread.sleep(result.delayMs) } catch (_: InterruptedException) { }
@@ -186,33 +217,29 @@ class SshTunnelService : Service() {
     }
 
     private fun waitForNetwork() {
-        while (shouldRun && !isNetworkAvailable()) {
+        while (shouldRun && !networkAvailable) {
             try { Thread.sleep(1_000) } catch (_: InterruptedException) { return }
         }
     }
 
-    private fun registerNetworkWakeReceiver() {
-        val r = object : BroadcastReceiver() {
-            override fun onReceive(context: Context, intent: Intent) {
-                consecutiveFailures = 0
-                if (shouldRun) {
-                    connectionThread?.interrupt()
-                }
-            }
-        }
-        networkWakeReceiver = r
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(r, IntentFilter(ACTION_NETWORK_AVAILABLE), RECEIVER_NOT_EXPORTED)
-        } else {
-            @Suppress("UnspecifiedRegisterReceiverFlag")
-            registerReceiver(r, IntentFilter(ACTION_NETWORK_AVAILABLE))
+    // ── Network callback registration ───────────────────────────────
+
+    private fun registerNetworkCallback() {
+        runCatching {
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            cm.registerNetworkCallback(
+                NetworkRequest.Builder()
+                    .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                    .build(),
+                networkCallback
+            )
         }
     }
 
-    private fun unregisterNetworkWakeReceiver() {
-        networkWakeReceiver?.let {
-            runCatching { unregisterReceiver(it) }
-            networkWakeReceiver = null
+    private fun unregisterNetworkCallback() {
+        runCatching {
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            cm.unregisterNetworkCallback(networkCallback)
         }
     }
 
@@ -275,7 +302,7 @@ class SshTunnelService : Service() {
         connectionThread?.interrupt()
         proxyServer?.stop()
         session?.disconnect()
-        unregisterNetworkWakeReceiver()
+        unregisterNetworkCallback()
         releaseLocks()
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         super.onDestroy()

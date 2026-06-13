@@ -73,8 +73,6 @@ class MainActivity : AppCompatActivity() {
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
             updateNetworkStatus()
-            // Wake up the tunnel service so it reconnects immediately
-            sendBroadcast(Intent(SshTunnelService.ACTION_NETWORK_AVAILABLE))
         }
         override fun onLost(network: Network) {
             updateNetworkStatus()
