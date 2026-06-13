@@ -291,4 +291,75 @@ class SshTunnelLogicTest {
     fun `cell zero speed`() {
         assertEquals("", SshTunnelLogic.getCellularGenerationName(0))
     }
+
+    // ── parseServer — chain (jump host) ─────────────────────────────
+
+    @Test
+    fun `parse chain with unicode arrow`() {
+        val r = SshTunnelLogic.parseServer("user1@jump.com → user2@target.com")
+        assertNotNull(r)
+        assertEquals("user2", r!!.user)
+        assertEquals("target.com", r.host)
+        assertEquals(22, r.port)
+        assertNotNull(r.jump)
+        assertEquals("user1", r.jump!!.user)
+        assertEquals("jump.com", r.jump.host)
+        assertEquals(22, r.jump.port)
+    }
+
+    @Test
+    fun `parse chain with ASCII arrow`() {
+        val r = SshTunnelLogic.parseServer("u1@jump.io -> u2@target.io:443")
+        assertNotNull(r)
+        assertEquals("u2", r!!.user)
+        assertEquals("target.io", r.host)
+        assertEquals(443, r.port)
+        assertEquals("u1", r.jump!!.user)
+        assertEquals("jump.io", r.jump.host)
+        assertEquals(22, r.jump.port)
+    }
+
+    @Test
+    fun `parse chain with gt arrow`() {
+        val r = SshTunnelLogic.parseServer("me@vps.me > root@box.io:2222")
+        assertNotNull(r)
+        assertEquals("root", r!!.user)
+        assertEquals("box.io", r.host)
+        assertEquals(2222, r.port)
+        assertEquals("me", r.jump!!.user)
+        assertEquals("vps.me", r.jump.host)
+        assertEquals(22, r.jump.port)
+    }
+
+    @Test
+    fun `parse chain both with custom ports`() {
+        val r = SshTunnelLogic.parseServer("jane@gw.example.com:444 → bob@db.internal:3306")
+        assertNotNull(r)
+        assertEquals("bob", r!!.user)
+        assertEquals("db.internal", r.host)
+        assertEquals(3306, r.port)
+        assertEquals("jane", r.jump!!.user)
+        assertEquals("gw.example.com", r.jump.host)
+        assertEquals(444, r.jump.port)
+    }
+
+    @Test
+    fun `parse chain invalid jump returns null`() {
+        assertNull(SshTunnelLogic.parseServer("@jump -> user@target"))
+    }
+
+    @Test
+    fun `parse chain invalid target returns null`() {
+        assertNull(SshTunnelLogic.parseServer("user@jump -> @target"))
+    }
+
+    @Test
+    fun `parse direct still works same as before`() {
+        val r = SshTunnelLogic.parseServer("admin@server.org:8080")
+        assertNotNull(r)
+        assertNull(r!!.jump)
+        assertEquals("admin", r.user)
+        assertEquals("server.org", r.host)
+        assertEquals(8080, r.port)
+    }
 }

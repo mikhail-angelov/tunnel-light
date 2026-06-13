@@ -104,7 +104,7 @@ class MainActivity : AppCompatActivity() {
         btnStart.setOnClickListener {
             val input = serverInput.text.toString().trim()
             val parsed = SshTunnelLogic.parseServer(input) ?: run {
-                statusView.text = "Invalid format — use user@host or user@host:22"
+                statusView.text = "Invalid format — use user@host or user@jump -> user@target"
                 return@setOnClickListener
             }
             prefs.edit().putString("server", input).apply()
@@ -113,6 +113,9 @@ class MainActivity : AppCompatActivity() {
                     .putExtra("user", parsed.user)
                     .putExtra("host", parsed.host)
                     .putExtra("port", parsed.port)
+                    .putExtra("jump_user", parsed.jump?.user)
+                    .putExtra("jump_host", parsed.jump?.host)
+                    .putExtra("jump_port", parsed.jump?.port ?: 22)
             )
         }
 

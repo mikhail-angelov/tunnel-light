@@ -21,7 +21,7 @@
             android:id="@+id/serverInput"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="user@hostname  or  user@hostname:22"
+            android:hint="user@host  or  user@jump:22 → user@target:8080"
             android:inputType="textNoSuggestions|textVisiblePassword"
             android:singleLine="true"
             android:layout_marginBottom="12dp" />

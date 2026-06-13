@@ -12,3 +12,6 @@ local.properties
 keystore/
 *.jks
 *.keystore
+
+# Backups
+*.bak

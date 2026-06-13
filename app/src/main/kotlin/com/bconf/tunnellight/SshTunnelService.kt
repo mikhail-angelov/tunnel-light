@@ -15,6 +15,7 @@ import androidx.core.app.ServiceCompat
 import com.jcraft.jsch.ChannelDirectTCPIP
 import com.jcraft.jsch.JSch
 import com.jcraft.jsch.JSchException
+import com.jcraft.jsch.Proxy
 import com.jcraft.jsch.Session
 import com.jcraft.jsch.SocketFactory as JSchSocketFactory
 import java.io.File
@@ -158,6 +159,11 @@ class SshTunnelService : Service() {
         val host = intent?.getStringExtra("host") ?: run { stopSelf(); return START_NOT_STICKY }
         val user = intent.getStringExtra("user") ?: run { stopSelf(); return START_NOT_STICKY }
         val port = intent.getIntExtra("port", 22)
+        val jumpUser = intent.getStringExtra("jump_user")
+        val jumpHost = intent.getStringExtra("jump_host")
+        val jumpPort = intent.getIntExtra("jump_port", 22)
+
+        val label = if (jumpUser != null) "$jumpUser@$jumpHost → $user@$host" else "$user@$host"
 
         if (shouldRun) return START_REDELIVER_INTENT
 
@@ -170,8 +176,8 @@ class SshTunnelService : Service() {
         acquireLocks()
         registerNetworkCallback()
 
-        updateNotification("Connecting to $host…")
-        sendStatus("Connecting to $host…")
+        updateNotification("Connecting to $label\u2026")
+        sendStatus("Connecting to $label\u2026")
 
         connectionThread = Thread {
             val keyFile = File(filesDir, "id_ed25519")
@@ -180,8 +186,8 @@ class SshTunnelService : Service() {
             while (shouldRun) {
                 // Guard: no network → wait until it comes back
                 if (!networkAvailable && shouldRun) {
-                    updateNotification("Waiting for network…")
-                    sendStatus("Network unavailable — waiting…")
+                    updateNotification("Waiting for network\u2026")
+                    sendStatus("Network unavailable \u2014 waiting\u2026")
                     waitForNetwork()
                     if (!shouldRun) break
                 }
@@ -191,29 +197,44 @@ class SshTunnelService : Service() {
                 val connectVia = preferredNetwork()
 
                 var sess: Session? = null
+                var jumpSess: Session? = null
                 var proxy: Socks5ProxyServer? = null
                 try {
                     if (firstAttempt) {
-                        sendStatus("Connecting to $host…")
+                        sendStatus("Connecting to $label\u2026")
                     }
                     firstAttempt = false
 
                     val jsch = JSch()
                     jsch.addIdentity(keyFile.absolutePath)
 
-                    sess = jsch.getSession(user, host, port)
-                    sess.setConfig("StrictHostKeyChecking", "no")
-                    sess.setConfig("TCPKeepAlive", "yes")
-                    sess.setConfig("ServerAliveInterval", "20")
-                    sess.setConfig("ServerAliveCountMax", "3")
-
-                    // Bind to the preferred network so the OS routes through
-                    // WiFi when both WiFi and cellular are active.
-                    if (connectVia != null) {
-                        sess.setSocketFactory(NetworkBoundSocketFactory(connectVia))
+                    // Connect jump host first if chaining
+                    if (jumpUser != null && jumpHost != null) {
+                        jumpSess = jsch.getSession(jumpUser, jumpHost, jumpPort).apply {
+                            setConfig("StrictHostKeyChecking", "no")
+                            setConfig("TCPKeepAlive", "yes")
+                            setConfig("ServerAliveInterval", "20")
+                            setConfig("ServerAliveCountMax", "3")
+                            if (connectVia != null) {
+                                setSocketFactory(NetworkBoundSocketFactory(connectVia))
+                            }
+                            connect(15_000)
+                        }
                     }
 
-                    sess.connect(15_000)
+                    // Connect target (via jump proxy if chaining, else direct)
+                    sess = jsch.getSession(user, host, port).apply {
+                        setConfig("StrictHostKeyChecking", "no")
+                        setConfig("TCPKeepAlive", "yes")
+                        setConfig("ServerAliveInterval", "20")
+                        setConfig("ServerAliveCountMax", "3")
+                        if (jumpSess != null) {
+                            setProxy(JumpProxy(jumpSess))
+                        } else if (connectVia != null) {
+                            setSocketFactory(NetworkBoundSocketFactory(connectVia))
+                        }
+                        connect(15_000)
+                    }
 
                     session = sess
                     proxy = Socks5ProxyServer(sess)
@@ -223,8 +244,8 @@ class SshTunnelService : Service() {
                     isRunning = true
                     consecutiveFailures = 0
                     backoffSec = 1
-                    updateNotification("Connected — SOCKS5 on 127.0.0.1:1080")
-                    sendStatus("Connected — SOCKS5 on 127.0.0.1:1080")
+                    updateNotification("Connected \u2014 SOCKS5 on 127.0.0.1:1080")
+                    sendStatus("Connected \u2014 SOCKS5 on 127.0.0.1:1080")
 
                     // Block until the session drops or we're asked to stop
                     while (shouldRun && sess.isConnected()) {
@@ -234,12 +255,11 @@ class SshTunnelService : Service() {
                     // Session died but shouldRun still true — reconnect
                     if (shouldRun) {
                         isRunning = false
-                        sendStatus("Connection lost — reconnecting…")
-                        updateNotification("Reconnecting…")
+                        sendStatus("Connection lost \u2014 reconnecting\u2026")
+                        updateNotification("Reconnecting\u2026")
                     }
                 } catch (_: InterruptedException) {
                     // Woken by stop(), network callback, or backoff interrupt
-                    // Loop re-evaluates shouldRun and networkAvailable
                 } catch (e: JSchException) {
                     consecutiveFailures++
                     if (SshTunnelLogic.isFatalSshError(e.message)) {
@@ -271,6 +291,7 @@ class SshTunnelService : Service() {
                     isRunning = false
                     proxy?.stop()
                     sess?.disconnect()
+                    jumpSess?.disconnect()
                     session = null
                     proxyServer = null
                 }
@@ -433,6 +454,39 @@ private class NetworkBoundSocketFactory(
         network.socketFactory.createSocket(host, port)
     override fun getInputStream(socket: Socket): InputStream = socket.inputStream
     override fun getOutputStream(socket: Socket): OutputStream = socket.outputStream
+}
+
+// ── Jump proxy (SSH through another SSH host) ────────────────────────
+
+/**
+ * A JSch Proxy implementation that tunnels TCP connections through an existing SSH session.
+ * Used for jump-host chaining: client → jump → target.
+ */
+private class JumpProxy(private val session: Session) : Proxy {
+
+    private var channel: ChannelDirectTCPIP? = null
+    private var inputStream: InputStream? = null
+    private var outputStream: OutputStream? = null
+
+    override fun connect(socketFactory: JSchSocketFactory, host: String, port: Int, timeout: Int) {
+        val ch = session.openChannel("direct-tcpip") as ChannelDirectTCPIP
+        ch.setHost(host)
+        ch.setPort(port)
+        ch.setOrgIPAddress("127.0.0.1")
+        ch.setOrgPort(0)
+        ch.connect(timeout)
+        channel = ch
+        inputStream = ch.inputStream
+        outputStream = ch.outputStream
+    }
+
+    override fun getInputStream() = inputStream
+    override fun getOutputStream() = outputStream
+    override fun getSocket() = null
+
+    override fun close() {
+        channel?.disconnect()
+    }
 }
 
 // ── SOCKS5 proxy server (RFC 1928) ────────────────────────────────────
