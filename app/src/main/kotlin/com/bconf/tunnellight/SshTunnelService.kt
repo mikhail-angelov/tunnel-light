@@ -167,18 +167,24 @@ class SshTunnelService : Service() {
                     // Woken by stop(), network callback, or backoff interrupt
                     // Loop re-evaluates shouldRun and networkAvailable
                 } catch (e: JSchException) {
-                    handleConnectionError(e, host)
-                    if (isFatalSshError(e)) {
-                        sendStatus("Fatal: ${e.message} — stopping")
-                        updateNotification("Error: authentication failed")
+                    consecutiveFailures++
+                    val msg = SshTunnelLogic.describeError(e.message, host, consecutiveFailures)
+                    sendStatus(msg); updateNotification(msg)
+                    if (SshTunnelLogic.isFatalSshError(e.message)) {
                         shouldRun = false
                     }
                 } catch (e: UnknownHostException) {
-                    handleConnectionError(e, host)
+                    consecutiveFailures++
+                    val msg = SshTunnelLogic.describeError(e.message, host, consecutiveFailures)
+                    sendStatus(msg); updateNotification(msg)
                 } catch (e: SocketTimeoutException) {
-                    handleConnectionError(e, host)
+                    consecutiveFailures++
+                    val msg = SshTunnelLogic.describeError(e.message, host, consecutiveFailures)
+                    sendStatus(msg); updateNotification(msg)
                 } catch (e: Exception) {
-                    handleConnectionError(e, host)
+                    consecutiveFailures++
+                    val msg = SshTunnelLogic.describeError(e.message, host, consecutiveFailures)
+                    sendStatus(msg); updateNotification(msg)
                 } finally {
                     isRunning = false
                     proxy?.stop()
@@ -189,8 +195,9 @@ class SshTunnelService : Service() {
 
                 // Backoff sleep before next reconnect attempt
                 if (shouldRun && networkAvailable) {
-                    val delay = backoffMs()
-                    try { Thread.sleep(delay) } catch (_: InterruptedException) { }
+                    val result = SshTunnelLogic.backoff(backoffSec)
+                    backoffSec = result.nextBackoffSec
+                    try { Thread.sleep(result.delayMs) } catch (_: InterruptedException) { }
                 }
             }
 
@@ -198,77 +205,6 @@ class SshTunnelService : Service() {
         }.also { it.start() }
 
         return START_REDELIVER_INTENT
-    }
-
-    // ── Error classification ────────────────────────────────────────
-
-    private fun isFatalSshError(e: JSchException): Boolean {
-        val msg = e.message ?: ""
-        return msg.contains("Auth fail") ||
-               msg.contains("USERAUTH fail") ||
-               msg.contains("invalid privatekey") ||
-               msg.contains("invalid privatekey file") ||
-               (msg.contains("key") && msg.contains("rejected"))
-    }
-
-    private fun isLikelyTransient(message: String?): Boolean {
-        if (message == null) return true
-        val m = message.lowercase()
-        return m.contains("connection refused") ||
-               m.contains("timeout") ||
-               m.contains("econnrefused") ||
-               m.contains("econnreset") ||
-               m.contains("econnaborted") ||
-               m.contains("network is unreachable") ||
-               m.contains("no route to host") ||
-               m.contains("key exchange") ||
-               m.contains("socket is closed")
-    }
-
-    // ── Human-readable status ───────────────────────────────────────
-
-    private fun describeError(e: Exception, host: String): String {
-        val msg = e.message ?: e.javaClass.simpleName
-        return when {
-            msg.contains("Auth fail", ignoreCase = true) ||
-            msg.contains("USERAUTH fail", ignoreCase = true) ->
-                "Authentication failed — check username and public key on server"
-            msg.contains("Connection refused", ignoreCase = true) ->
-                "Connection refused — is SSH running on $host?"
-            msg.contains("UnknownHost", ignoreCase = true) ||
-            e is UnknownHostException ->
-                "Cannot resolve $host — check server address or DNS"
-            msg.contains("timeout", ignoreCase = true) ->
-                "Connection timed out — check server availability"
-            msg.contains("Key exchange", ignoreCase = true) ->
-                "Key exchange failed — server may not support Ed25519"
-            msg.contains("Network is unreachable", ignoreCase = true) ->
-                "Network unreachable — are you connected to the internet?"
-            msg.contains("invalid privatekey", ignoreCase = true) ->
-                "Invalid private key — try regenerating the key"
-            consecutiveFailures >= 5 ->
-                "Could not reach $host after $consecutiveFailures attempts — verify server address"
-            else -> {
-                val short = msg.take(100)
-                if (isLikelyTransient(msg)) "Connection failed — $short"
-                else "Error — $short"
-            }
-        }
-    }
-
-    private fun handleConnectionError(e: Exception, host: String) {
-        consecutiveFailures++
-        val text = describeError(e, host)
-        sendStatus(text)
-        updateNotification(text)
-    }
-
-    // ── Exponential backoff (1s → 2s → 4s → … → 60s cap) ──────────
-
-    private fun backoffMs(): Long {
-        val wait = (backoffSec * 1000L).coerceAtMost(60_000L)
-        backoffSec = (backoffSec * 2).coerceAtMost(60)
-        return wait
     }
 
     private fun waitForNetwork() {
@@ -339,7 +275,7 @@ class SshTunnelService : Service() {
         val notification = Notification.Builder(this, "ssh")
             .setContentTitle("SSH Tunnel")
             .setContentText(message)
-            .setSmallIcon(android.R.drawable.ic_menu_share)
+            .setSmallIcon(R.drawable.ic_tunnel_notification)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
             .build()

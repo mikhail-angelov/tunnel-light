@@ -60,4 +60,6 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("com.github.mwiede:jsch:0.2.17")
     implementation("org.bouncycastle:bcprov-jdk15to18:1.78")
+
+    testImplementation("junit:junit:4.13.2")
 }

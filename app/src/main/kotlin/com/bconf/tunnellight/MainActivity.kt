@@ -116,16 +116,16 @@ class MainActivity : AppCompatActivity() {
 
         btnStart.setOnClickListener {
             val input = serverInput.text.toString().trim()
-            val (user, host, port) = parseServer(input) ?: run {
+            val parsed = SshTunnelLogic.parseServer(input) ?: run {
                 statusView.text = "Invalid format — use user@host or user@host:22"
                 return@setOnClickListener
             }
             prefs.edit().putString("server", input).apply()
             startForegroundService(
                 Intent(this, SshTunnelService::class.java)
-                    .putExtra("user", user)
-                    .putExtra("host", host)
-                    .putExtra("port", port)
+                    .putExtra("user", parsed.user)
+                    .putExtra("host", parsed.host)
+                    .putExtra("port", parsed.port)
             )
         }
 
@@ -254,7 +254,7 @@ class MainActivity : AppCompatActivity() {
             caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> {
                 val type = when {
                     caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) -> ""
-                    else -> getCellularGeneration(caps)
+                    else -> SshTunnelLogic.getCellularGenerationName(caps.linkDownstreamBandwidthKbps)
                 }
                 "\uD83D\uDCF1" to "Mobile$type"
             }
@@ -264,17 +264,6 @@ class MainActivity : AppCompatActivity() {
         }
         networkStatusView.text = "$icon $label"
         networkStatusView.setTextColor(0xFF44AA44.toInt())
-    }
-
-    private fun getCellularGeneration(caps: NetworkCapabilities): String {
-        val downSpeed = caps.linkDownstreamBandwidthKbps
-        return when {
-            downSpeed >= 100_000 -> " (5G)"
-            downSpeed >= 20_000 -> " (4G)"
-            downSpeed >= 1_000 -> " (3G)"
-            downSpeed > 0 -> " (2G)"
-            else -> ""
-        }
     }
 
     private fun loadPublicKey() {
@@ -391,23 +380,4 @@ class MainActivity : AppCompatActivity() {
     }
 
     // --- end key generation ---
-
-    private fun parseServer(input: String): Triple<String, String, Int>? {
-        val atIdx = input.indexOf('@')
-        if (atIdx < 1) return null
-        val user = input.substring(0, atIdx)
-        val hostPart = input.substring(atIdx + 1)
-        val colonIdx = hostPart.lastIndexOf(':')
-        val host: String
-        val port: Int
-        if (colonIdx >= 0) {
-            host = hostPart.substring(0, colonIdx)
-            port = hostPart.substring(colonIdx + 1).toIntOrNull() ?: 22
-        } else {
-            host = hostPart
-            port = 22
-        }
-        if (host.isEmpty() || user.isEmpty()) return null
-        return Triple(user, host, port)
-    }
 }
