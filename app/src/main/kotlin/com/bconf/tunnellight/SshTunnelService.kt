@@ -16,6 +16,7 @@ import com.jcraft.jsch.ChannelDirectTCPIP
 import com.jcraft.jsch.JSch
 import com.jcraft.jsch.JSchException
 import com.jcraft.jsch.Session
+import com.jcraft.jsch.SocketFactory as JSchSocketFactory
 import java.io.File
 import java.io.InputStream
 import java.io.OutputStream
@@ -37,7 +38,16 @@ class SshTunnelService : Service() {
     }
 
     @Volatile private var shouldRun = false
-    @Volatile private var networkAvailable = true
+
+    // ── Network state ────────────────────────────────────────────────
+    // wifiNetwork and cellNetwork are the currently active Network objects
+    // for each transport type. preferredNetwork() returns wifi > cell.
+    @Volatile private var wifiNetwork: Network? = null
+    @Volatile private var cellNetwork: Network? = null
+    @Volatile private var networkAvailable = false
+
+    private fun preferredNetwork(): Network? = wifiNetwork ?: cellNetwork
+
     private var session: Session? = null
     private var proxyServer: Socks5ProxyServer? = null
     private var connectionThread: Thread? = null
@@ -48,34 +58,73 @@ class SshTunnelService : Service() {
     @Volatile private var backoffSec = 1
     @Volatile private var consecutiveFailures = 0
 
-    // ── Network callback (always active while service runs) ──────────
+    // ── Network callback ─────────────────────────────────────────────
+    // Single callback; we inspect transport type to track wifi vs cell
+    // separately and interrupt the connection thread when the preferred
+    // network changes.
 
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
-            val wasDown = !networkAvailable
-            networkAvailable = true
-            networkStatusText("📶 Connected")
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val caps = runCatching { cm.getNetworkCapabilities(network) }.getOrNull()
+            val isWifi = caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+            val isCell = caps?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true
+
+            val hadNetwork = networkAvailable
+            val hadWifi = wifiNetwork != null
+
+            if (isWifi) wifiNetwork = network
+            else if (isCell) cellNetwork = network
+
+            networkAvailable = preferredNetwork() != null
             consecutiveFailures = 0
-            if (wasDown && shouldRun) {
-                sendStatus("Network available — reconnecting…")
-                connectionThread?.interrupt()
+            updateNetworkStatus()
+
+            if (shouldRun) {
+                when {
+                    !hadNetwork -> {
+                        // Came back from no-network state
+                        sendStatus("Network available — reconnecting…")
+                        connectionThread?.interrupt()
+                    }
+                    isWifi && !hadWifi -> {
+                        // WiFi appeared while we were on cellular — switch to WiFi
+                        sendStatus("WiFi available — switching from cellular…")
+                        connectionThread?.interrupt()
+                    }
+                }
             }
         }
 
         override fun onLost(network: Network) {
-            networkAvailable = false
-            networkStatusText("⛔ No internet")
+            val wasWifi = network == wifiNetwork
+            val wasCell = network == cellNetwork
+            if (wasWifi) wifiNetwork = null
+            if (wasCell) cellNetwork = null
+            networkAvailable = preferredNetwork() != null
+            updateNetworkStatus()
+
             if (shouldRun) {
-                isRunning = false
-                sendStatus("Network lost — waiting…")
-                updateNotification("Waiting for network…")
-                connectionThread?.interrupt()
+                when {
+                    !networkAvailable -> {
+                        isRunning = false
+                        sendStatus("Network lost — waiting…")
+                        updateNotification("Waiting for network…")
+                        connectionThread?.interrupt()
+                    }
+                    wasWifi -> {
+                        // WiFi dropped but cellular is still up — reconnect on cell
+                        sendStatus("WiFi lost — switching to cellular…")
+                        connectionThread?.interrupt()
+                    }
+                    // cell lost while WiFi still active: existing session stays on WiFi, no interrupt
+                }
             }
         }
 
         override fun onUnavailable() {
             networkAvailable = false
-            networkStatusText("⛔ No internet")
+            updateNetworkStatus()
             if (shouldRun) {
                 sendStatus("No network available — waiting…")
                 connectionThread?.interrupt()
@@ -83,7 +132,7 @@ class SshTunnelService : Service() {
         }
     }
 
-    // ── Lifecycle ───────────────────────────────────────────────────
+    // ── Lifecycle ────────────────────────────────────────────────────
 
     override fun onCreate() {
         super.onCreate()
@@ -106,8 +155,7 @@ class SshTunnelService : Service() {
         isRunning = false
         backoffSec = 1
         consecutiveFailures = 0
-        networkAvailable = isNetworkAvailable()
-        networkStatusText(if (networkAvailable) "\uD83D\uDCF6 Connected" else "\u26D4 No internet")
+        initNetworkState()
 
         acquireLocks()
         registerNetworkCallback()
@@ -128,6 +176,10 @@ class SshTunnelService : Service() {
                     if (!shouldRun) break
                 }
 
+                // Capture the preferred network at the moment we begin connecting
+                // so the socket is bound to that specific interface.
+                val connectVia = preferredNetwork()
+
                 var sess: Session? = null
                 var proxy: Socks5ProxyServer? = null
                 try {
@@ -144,6 +196,13 @@ class SshTunnelService : Service() {
                     sess.setConfig("TCPKeepAlive", "yes")
                     sess.setConfig("ServerAliveInterval", "20")
                     sess.setConfig("ServerAliveCountMax", "3")
+
+                    // Bind to the preferred network so the OS routes through
+                    // WiFi when both WiFi and cellular are active.
+                    if (connectVia != null) {
+                        sess.setSocketFactory(NetworkBoundSocketFactory(connectVia))
+                    }
+
                     sess.connect(15_000)
 
                     session = sess
@@ -162,7 +221,7 @@ class SshTunnelService : Service() {
                         Thread.sleep(3_000)
                     }
 
-                    // If we get here the session died but we should keep trying
+                    // Session died but shouldRun still true — reconnect
                     if (shouldRun) {
                         isRunning = false
                         sendStatus("Connection lost — reconnecting…")
@@ -220,13 +279,21 @@ class SshTunnelService : Service() {
         return START_REDELIVER_INTENT
     }
 
-    private fun isNetworkAvailable(): Boolean {
-        return runCatching {
+    // ── Network state helpers ─────────────────────────────────────────
+
+    private fun initNetworkState() {
+        runCatching {
             val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-            val active = cm.activeNetwork ?: return false
-            val caps = cm.getNetworkCapabilities(active) ?: return false
-            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-        }.getOrDefault(false)
+            for (network in cm.allNetworks) {
+                val caps = cm.getNetworkCapabilities(network) ?: continue
+                when {
+                    caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> wifiNetwork = network
+                    caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> cellNetwork = network
+                }
+            }
+        }
+        networkAvailable = preferredNetwork() != null
+        updateNetworkStatus()
     }
 
     private fun waitForNetwork() {
@@ -235,7 +302,25 @@ class SshTunnelService : Service() {
         }
     }
 
-    // ── Network callback registration ───────────────────────────────
+    private fun updateNetworkStatus() {
+        val wifi = wifiNetwork
+        val cell = cellNetwork
+        lastNetworkStatus = when {
+            wifi != null && cell != null ->
+                "📶 WiFi • 📡 Cell${getCellGeneration(cell)}"
+            wifi != null -> "📶 WiFi"
+            cell != null -> "📡 Cell${getCellGeneration(cell)}"
+            else -> "⛔ No internet"
+        }
+    }
+
+    private fun getCellGeneration(network: Network): String = runCatching {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val caps = cm.getNetworkCapabilities(network) ?: return@runCatching ""
+        SshTunnelLogic.getCellularGenerationName(caps.linkDownstreamBandwidthKbps)
+    }.getOrDefault("")
+
+    // ── Network callback registration ─────────────────────────────────
 
     private fun registerNetworkCallback() {
         runCatching {
@@ -254,7 +339,7 @@ class SshTunnelService : Service() {
         }
     }
 
-    // ── Locks ───────────────────────────────────────────────────────
+    // ── Locks ─────────────────────────────────────────────────────────
 
     private fun acquireLocks() {
         wakeLock = getSystemService(PowerManager::class.java)
@@ -277,15 +362,11 @@ class SshTunnelService : Service() {
         }
     }
 
-    // ── Broadcast & Notification ────────────────────────────────────
+    // ── Broadcast & Notification ───────────────────────────────────────
 
     private fun sendStatus(message: String) {
         lastStatus = message
         sendBroadcast(Intent(ACTION_STATUS).putExtra(EXTRA_STATUS, message))
-    }
-
-    private fun networkStatusText(text: String) {
-        lastNetworkStatus = text
     }
 
     private fun updateNotification(message: String) {
@@ -306,7 +387,7 @@ class SshTunnelService : Service() {
         startForeground(1, notification)
     }
 
-    // ── Standard overrides ──────────────────────────────────────────
+    // ── Standard overrides ─────────────────────────────────────────────
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -324,7 +405,20 @@ class SshTunnelService : Service() {
     }
 }
 
-// ── SOCKS5 proxy server (RFC 1928) ───────────────────────────────────
+// ── Socket factory bound to a specific Android Network ────────────────
+// JSch uses this to open its TCP connection through the chosen interface
+// (WiFi or cellular) rather than letting the OS pick arbitrarily.
+
+private class NetworkBoundSocketFactory(
+    private val network: Network
+) : JSchSocketFactory {
+    override fun createSocket(host: String, port: Int): Socket =
+        network.socketFactory.createSocket(host, port)
+    override fun getInputStream(socket: Socket): InputStream = socket.inputStream
+    override fun getOutputStream(socket: Socket): OutputStream = socket.outputStream
+}
+
+// ── SOCKS5 proxy server (RFC 1928) ────────────────────────────────────
 
 private class Socks5ProxyServer(
     private val session: Session,
