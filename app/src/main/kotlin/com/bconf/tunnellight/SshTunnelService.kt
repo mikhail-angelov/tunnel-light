@@ -58,37 +58,29 @@ class SshTunnelService : Service() {
     @Volatile private var backoffSec = 1
     @Volatile private var consecutiveFailures = 0
 
-    // ── Network callback ─────────────────────────────────────────────
-    // Single callback; we inspect transport type to track wifi vs cell
-    // separately and interrupt the connection thread when the preferred
-    // network changes.
+    // ── Network callbacks ────────────────────────────────────────────
+    // One callback per transport type so Android does the classification
+    // for us. onAvailable fires with type already guaranteed — no need to
+    // call getNetworkCapabilities() here (it returns null before
+    // onCapabilitiesChanged fires anyway, which was the stuck-on-
+    // "No internet" bug when using a single unfiltered callback).
 
-    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
+    private val wifiCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
-            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-            val caps = runCatching { cm.getNetworkCapabilities(network) }.getOrNull()
-            val isWifi = caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
-            val isCell = caps?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true
-
             val hadNetwork = networkAvailable
             val hadWifi = wifiNetwork != null
-
-            if (isWifi) wifiNetwork = network
-            else if (isCell) cellNetwork = network
-
-            networkAvailable = preferredNetwork() != null
+            wifiNetwork = network
+            networkAvailable = true
             consecutiveFailures = 0
             updateNetworkStatus()
-
             if (shouldRun) {
                 when {
                     !hadNetwork -> {
-                        // Came back from no-network state
                         sendStatus("Network available — reconnecting…")
                         connectionThread?.interrupt()
                     }
-                    isWifi && !hadWifi -> {
-                        // WiFi appeared while we were on cellular — switch to WiFi
+                    !hadWifi -> {
+                        // Cellular was active; switch to the preferred WiFi
                         sendStatus("WiFi available — switching from cellular…")
                         connectionThread?.interrupt()
                     }
@@ -97,38 +89,56 @@ class SshTunnelService : Service() {
         }
 
         override fun onLost(network: Network) {
-            val wasWifi = network == wifiNetwork
-            val wasCell = network == cellNetwork
-            if (wasWifi) wifiNetwork = null
-            if (wasCell) cellNetwork = null
+            if (network == wifiNetwork) wifiNetwork = null
             networkAvailable = preferredNetwork() != null
             updateNetworkStatus()
-
             if (shouldRun) {
-                when {
-                    !networkAvailable -> {
-                        isRunning = false
-                        sendStatus("Network lost — waiting…")
-                        updateNotification("Waiting for network…")
-                        connectionThread?.interrupt()
-                    }
-                    wasWifi -> {
-                        // WiFi dropped but cellular is still up — reconnect on cell
-                        sendStatus("WiFi lost — switching to cellular…")
-                        connectionThread?.interrupt()
-                    }
-                    // cell lost while WiFi still active: existing session stays on WiFi, no interrupt
+                if (!networkAvailable) {
+                    isRunning = false
+                    sendStatus("Network lost — waiting…")
+                    updateNotification("Waiting for network…")
+                    connectionThread?.interrupt()
+                } else {
+                    // Cellular still up — reconnect through it
+                    sendStatus("WiFi lost — switching to cellular…")
+                    connectionThread?.interrupt()
                 }
             }
         }
+    }
 
-        override fun onUnavailable() {
-            networkAvailable = false
+    private val cellCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) {
+            val hadNetwork = networkAvailable
+            cellNetwork = network
+            networkAvailable = true
+            consecutiveFailures = 0
             updateNetworkStatus()
-            if (shouldRun) {
-                sendStatus("No network available — waiting…")
+            // Wake the thread only when coming up from no-network; if WiFi
+            // is already active we don't switch to cellular.
+            if (shouldRun && !hadNetwork) {
+                sendStatus("Network available — reconnecting…")
                 connectionThread?.interrupt()
             }
+        }
+
+        override fun onLost(network: Network) {
+            if (network == cellNetwork) cellNetwork = null
+            networkAvailable = preferredNetwork() != null
+            updateNetworkStatus()
+            // Only interrupt when there's no WiFi fallback
+            if (shouldRun && !networkAvailable) {
+                isRunning = false
+                sendStatus("Network lost — waiting…")
+                updateNotification("Waiting for network…")
+                connectionThread?.interrupt()
+            }
+            // WiFi still active: session keeps running, nothing to do
+        }
+
+        override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
+            // Refresh cell generation label (4G/5G/…) when it becomes known
+            if (network == cellNetwork) updateNetworkStatus()
         }
     }
 
@@ -326,17 +336,24 @@ class SshTunnelService : Service() {
         runCatching {
             val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
             cm.registerNetworkCallback(
-                NetworkRequest.Builder().build(),
-                networkCallback
+                NetworkRequest.Builder()
+                    .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                    .build(),
+                wifiCallback
+            )
+            cm.registerNetworkCallback(
+                NetworkRequest.Builder()
+                    .addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
+                    .build(),
+                cellCallback
             )
         }
     }
 
     private fun unregisterNetworkCallback() {
-        runCatching {
-            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-            cm.unregisterNetworkCallback(networkCallback)
-        }
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        runCatching { cm.unregisterNetworkCallback(wifiCallback) }
+        runCatching { cm.unregisterNetworkCallback(cellCallback) }
     }
 
     // ── Locks ─────────────────────────────────────────────────────────
