@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- Simple tunnel arch — all white for notification small icon -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M4,22 L4,12 C4,7 7.5,3 12,3 C16.5,3 20,7 20,12 L20,22 Z" />
+    <!-- Light glow at the far end -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillAlpha="0.7"
+        android:pathData="M12,8 m-2,0 a2,2 0 1,1 4,0 a2,2 0 1,1 -4,0" />
+</vector>

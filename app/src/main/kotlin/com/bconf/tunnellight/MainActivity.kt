@@ -33,6 +33,7 @@ import java.util.Base64
 class MainActivity : AppCompatActivity() {
 
     private lateinit var statusView: TextView
+    private lateinit var networkStatusView: TextView
     private lateinit var serverInput: EditText
     private lateinit var publicKeyView: TextView
     private lateinit var generatingLayout: LinearLayout
@@ -47,6 +48,11 @@ class MainActivity : AppCompatActivity() {
         override fun onReceive(context: Context, intent: Intent) {
             val msg = intent.getStringExtra(SshTunnelService.EXTRA_STATUS) ?: return
             statusView.text = msg
+            networkStatusView.text = SshTunnelService.lastNetworkStatus
+            networkStatusView.setTextColor(
+                if (SshTunnelService.lastNetworkStatus.contains("\u26D4"))
+                    0xFFCC4444.toInt() else 0xFF44AA44.toInt()
+            )
             when {
                 msg.startsWith("Connected") -> setTunnelUi(connected = true)
                 msg.startsWith("Connecting") -> setTunnelUi(connecting = true)
@@ -65,11 +71,14 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // ── Network status is read from SshTunnelService.lastNetworkStatus ──
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
         statusView = findViewById(R.id.status)
+        networkStatusView = findViewById(R.id.networkStatus)
         serverInput = findViewById(R.id.serverInput)
         publicKeyView = findViewById(R.id.publicKey)
         generatingLayout = findViewById(R.id.generatingLayout)
@@ -98,16 +107,16 @@ class MainActivity : AppCompatActivity() {
 
         btnStart.setOnClickListener {
             val input = serverInput.text.toString().trim()
-            val (user, host, port) = parseServer(input) ?: run {
+            val parsed = SshTunnelLogic.parseServer(input) ?: run {
                 statusView.text = "Invalid format — use user@host or user@host:22"
                 return@setOnClickListener
             }
             prefs.edit().putString("server", input).apply()
             startForegroundService(
                 Intent(this, SshTunnelService::class.java)
-                    .putExtra("user", user)
-                    .putExtra("host", host)
-                    .putExtra("port", port)
+                    .putExtra("user", parsed.user)
+                    .putExtra("host", parsed.host)
+                    .putExtra("port", parsed.port)
             )
         }
 
@@ -142,6 +151,12 @@ class MainActivity : AppCompatActivity() {
             @Suppress("UnspecifiedRegisterReceiverFlag")
             registerReceiver(statusReceiver, filter)
         }
+        // Read latest network status from service
+        networkStatusView.text = SshTunnelService.lastNetworkStatus
+        networkStatusView.setTextColor(
+            if (SshTunnelService.lastNetworkStatus.contains("\u26D4"))
+                0xFFCC4444.toInt() else 0xFF44AA44.toInt()
+        )
         // Sync UI with service state in case we returned from background
         if (publicKeyView.visibility == View.VISIBLE) {
             val running = SshTunnelService.isRunning
@@ -194,6 +209,8 @@ class MainActivity : AppCompatActivity() {
         btnStart.isEnabled = !connected && !connecting
         btnStop.isEnabled = connected || connecting
     }
+
+    // Network status is read from SshTunnelService.lastNetworkStatus (see onResume + statusReceiver)
 
     private fun loadPublicKey() {
         val pub = File(filesDir, "id_ed25519.pub")
@@ -309,23 +326,4 @@ class MainActivity : AppCompatActivity() {
     }
 
     // --- end key generation ---
-
-    private fun parseServer(input: String): Triple<String, String, Int>? {
-        val atIdx = input.indexOf('@')
-        if (atIdx < 1) return null
-        val user = input.substring(0, atIdx)
-        val hostPart = input.substring(atIdx + 1)
-        val colonIdx = hostPart.lastIndexOf(':')
-        val host: String
-        val port: Int
-        if (colonIdx >= 0) {
-            host = hostPart.substring(0, colonIdx)
-            port = hostPart.substring(colonIdx + 1).toIntOrNull() ?: 22
-        } else {
-            host = hostPart
-            port = 22
-        }
-        if (host.isEmpty() || user.isEmpty()) return null
-        return Triple(user, host, port)
-    }
 }
