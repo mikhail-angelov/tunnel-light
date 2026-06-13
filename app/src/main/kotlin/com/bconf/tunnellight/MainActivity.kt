@@ -34,7 +34,9 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var statusView: TextView
     private lateinit var networkStatusView: TextView
+    private lateinit var jumpInput: EditText
     private lateinit var serverInput: EditText
+    private lateinit var btnToggleJump: Button
     private lateinit var publicKeyView: TextView
     private lateinit var generatingLayout: LinearLayout
     private lateinit var btnStart: Button
@@ -75,7 +77,9 @@ class MainActivity : AppCompatActivity() {
 
         statusView = findViewById(R.id.status)
         networkStatusView = findViewById(R.id.networkStatus)
+        jumpInput = findViewById(R.id.jumpInput)
         serverInput = findViewById(R.id.serverInput)
+        btnToggleJump = findViewById(R.id.btnToggleJump)
         publicKeyView = findViewById(R.id.publicKey)
         generatingLayout = findViewById(R.id.generatingLayout)
         btnStart = findViewById(R.id.btnStart)
@@ -86,6 +90,14 @@ class MainActivity : AppCompatActivity() {
         btnStart.isEnabled = false
         btnStop.isEnabled = false
         serverInput.setText(prefs.getString("server", ""))
+        jumpInput.setText(prefs.getString("jump", ""))
+
+        // Toggle jump host field
+        btnToggleJump.setOnClickListener {
+            val shown = jumpInput.visibility == View.VISIBLE
+            jumpInput.visibility = if (shown) View.GONE else View.VISIBLE
+            btnToggleJump.text = if (shown) "+" else "\u2212"
+        }
 
         generateKeyIfNeeded()
         requestPermissionsIfNeeded()
@@ -102,20 +114,28 @@ class MainActivity : AppCompatActivity() {
         })
 
         btnStart.setOnClickListener {
-            val input = serverInput.text.toString().trim()
-            val parsed = SshTunnelLogic.parseServer(input) ?: run {
-                statusView.text = "Invalid format — use user@host or user@jump -> user@target"
+            val targetStr = serverInput.text.toString().trim()
+            val target = SshTunnelLogic.parseServer(targetStr) ?: run {
+                statusView.text = "Invalid target format — use user@host:port"
                 return@setOnClickListener
             }
-            prefs.edit().putString("server", input).apply()
+            val jumpStr = jumpInput.text.toString().trim()
+            val jump = if (jumpStr.isNotEmpty()) {
+                SshTunnelLogic.parseServer(jumpStr) ?: run {
+                    statusView.text = "Invalid jump format — use user@host:port"
+                    return@setOnClickListener
+                }
+            } else null
+
+            prefs.edit().putString("server", targetStr).putString("jump", jumpStr).apply()
             startForegroundService(
                 Intent(this, SshTunnelService::class.java)
-                    .putExtra("user", parsed.user)
-                    .putExtra("host", parsed.host)
-                    .putExtra("port", parsed.port)
-                    .putExtra("jump_user", parsed.jump?.user)
-                    .putExtra("jump_host", parsed.jump?.host)
-                    .putExtra("jump_port", parsed.jump?.port ?: 22)
+                    .putExtra("user", target.user)
+                    .putExtra("host", target.host)
+                    .putExtra("port", target.port)
+                    .putExtra("jump_user", jump?.user)
+                    .putExtra("jump_host", jump?.host)
+                    .putExtra("jump_port", jump?.port ?: 22)
             )
         }
 
