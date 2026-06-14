@@ -34,7 +34,9 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var statusView: TextView
     private lateinit var networkStatusView: TextView
+    private lateinit var jumpInput: EditText
     private lateinit var serverInput: EditText
+    private lateinit var btnToggleJump: Button
     private lateinit var publicKeyView: TextView
     private lateinit var generatingLayout: LinearLayout
     private lateinit var btnStart: Button
@@ -75,7 +77,9 @@ class MainActivity : AppCompatActivity() {
 
         statusView = findViewById(R.id.status)
         networkStatusView = findViewById(R.id.networkStatus)
+        jumpInput = findViewById(R.id.jumpInput)
         serverInput = findViewById(R.id.serverInput)
+        btnToggleJump = findViewById(R.id.btnToggleJump)
         publicKeyView = findViewById(R.id.publicKey)
         generatingLayout = findViewById(R.id.generatingLayout)
         btnStart = findViewById(R.id.btnStart)
@@ -86,6 +90,27 @@ class MainActivity : AppCompatActivity() {
         btnStart.isEnabled = false
         btnStop.isEnabled = false
         serverInput.setText(prefs.getString("server", ""))
+        jumpInput.setText(prefs.getString("jump", ""))
+
+        // Toggle jump host field; hiding also clears it so the tunnel uses no jump host
+        btnToggleJump.setOnClickListener {
+            val shown = jumpInput.visibility == View.VISIBLE
+            if (shown) {
+                jumpInput.text.clear()
+                jumpInput.visibility = View.GONE
+                btnToggleJump.text = "+"
+            } else {
+                jumpInput.visibility = View.VISIBLE
+                btnToggleJump.text = "\u2212"
+                jumpInput.requestFocus()
+            }
+        }
+
+        // Show jump field on start if a jump host was previously saved
+        if (prefs.getString("jump", "").isNullOrEmpty().not()) {
+            jumpInput.visibility = View.VISIBLE
+            btnToggleJump.text = "\u2212"
+        }
 
         generateKeyIfNeeded()
         requestPermissionsIfNeeded()
@@ -102,17 +127,32 @@ class MainActivity : AppCompatActivity() {
         })
 
         btnStart.setOnClickListener {
-            val input = serverInput.text.toString().trim()
-            val parsed = SshTunnelLogic.parseServer(input) ?: run {
-                statusView.text = "Invalid format — use user@host or user@host:22"
+            val targetStr = serverInput.text.toString().trim()
+            val target = SshTunnelLogic.parseServer(targetStr) ?: run {
+                statusView.text = "Invalid target format — use user@host:port"
                 return@setOnClickListener
             }
-            prefs.edit().putString("server", input).apply()
+            val jumpStr = jumpInput.text.toString().trim()
+            val jumpFromField = if (jumpStr.isNotEmpty()) {
+                SshTunnelLogic.parseServer(jumpStr) ?: run {
+                    statusView.text = "Invalid jump format — use user@host:port"
+                    return@setOnClickListener
+                }
+            } else null
+            // jumpInput takes priority; fall back to chain syntax in serverInput
+            val eJumpUser = jumpFromField?.user ?: target.jump?.user
+            val eJumpHost = jumpFromField?.host ?: target.jump?.host
+            val eJumpPort = jumpFromField?.port ?: target.jump?.port ?: 22
+
+            prefs.edit().putString("server", targetStr).putString("jump", jumpStr).apply()
             startForegroundService(
                 Intent(this, SshTunnelService::class.java)
-                    .putExtra("user", parsed.user)
-                    .putExtra("host", parsed.host)
-                    .putExtra("port", parsed.port)
+                    .putExtra("user", target.user)
+                    .putExtra("host", target.host)
+                    .putExtra("port", target.port)
+                    .putExtra("jump_user", eJumpUser)
+                    .putExtra("jump_host", eJumpHost)
+                    .putExtra("jump_port", eJumpPort)
             )
         }
 

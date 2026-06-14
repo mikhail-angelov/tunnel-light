@@ -5,18 +5,68 @@ package com.bconf.tunnellight
  */
 object SshTunnelLogic {
 
-    data class ServerInfo(val user: String, val host: String, val port: Int)
+    data class HostInfo(val user: String, val host: String, val port: Int)
+
+    data class ServerInfo(
+        val user: String,
+        val host: String,
+        val port: Int,
+        /** Optional jump host — if set, connect via this host first. */
+        val jump: HostInfo? = null
+    )
 
     data class BackoffResult(val delayMs: Long, val nextBackoffSec: Int)
 
     /**
-     * Parse "user@host" or "user@host:port" into its components.
+     * Parse a server address string.
+     *
+     * Supported formats:
+     * - `"user@host"` — direct (default port 22)
+     * - `"user@host:port"` — direct with custom port
+     * - `"user@jump:port → user@target:port"` — chain via jump host
+     * - `"user@jump → user@target"` — chain (default ports 22)
+     *
+     * The arrow separator can be ` → `, `->`, or `>`.
      */
     fun parseServer(input: String): ServerInfo? {
-        val atIdx = input.indexOf('@')
+        val trimmed = input.trim()
+        if (trimmed.isEmpty()) return null
+
+        // Try to split by arrow (→) for chain syntax
+        val parts = splitChain(trimmed)
+        if (parts.size == 2) {
+            val jump = parseSingle(parts[0]) ?: return null
+            val target = parseSingle(parts[1]) ?: return null
+            return ServerInfo(target.user, target.host, target.port, jump)
+        }
+
+        // Single host
+        val single = parseSingle(trimmed) ?: return null
+        return ServerInfo(single.user, single.host, single.port)
+    }
+
+    /**
+     * Split input by chain separator: ` → `, ` -> `, or ` > `.
+     */
+    private fun splitChain(input: String): List<String> {
+        // Try Unicode arrow first, then ASCII alternatives (all require surrounding spaces)
+        val separators = listOf(" → ", " -> ", " > ")
+        for (sep in separators) {
+            val parts = input.split(sep, limit = 2)
+            if (parts.size == 2) return parts
+        }
+        return listOf(input)
+    }
+
+    /**
+     * Parse a single "user@host" or "user@host:port".
+     */
+    private fun parseSingle(input: String): HostInfo? {
+        val s = input.trim()
+        val atIdx = s.indexOf('@')
         if (atIdx < 1) return null
-        val user = input.substring(0, atIdx)
-        val hostPart = input.substring(atIdx + 1)
+        val user = s.substring(0, atIdx)
+        val hostPart = s.substring(atIdx + 1)
         val colonIdx = hostPart.lastIndexOf(':')
         val host: String
         val port: Int
@@ -28,12 +78,12 @@ object SshTunnelLogic {
             port = 22
         }
         if (host.isEmpty() || user.isEmpty()) return null
-        return ServerInfo(user, host, port)
+        return HostInfo(user, host, port)
     }
 
-    /**
-     * Errors that should stop the tunnel rather than retry.
-     */
+    // ── Error classification ────────────────────────────────────────
+
+    /** Returns true if the error is permanent and retrying is pointless (e.g. auth failure). */
     fun isFatalSshError(message: String?): Boolean {
         val msg = message ?: return false
         return msg.contains("Auth fail", ignoreCase = true) ||
@@ -42,10 +92,7 @@ object SshTunnelLogic {
                 (msg.contains("key", ignoreCase = true) && msg.contains("rejected", ignoreCase = true))
     }
 
-    /**
-     * Errors that are likely transient (network flakiness, server busy, etc.)
-     * and justify an automatic retry.
-     */
+    /** Returns true if the error is likely caused by network flakiness and retrying makes sense. */
     fun isLikelyTransient(message: String?): Boolean {
         if (message == null) return true
         val m = message.lowercase()
@@ -61,13 +108,7 @@ object SshTunnelLogic {
                 m.contains("socket is closed")
     }
 
-    /**
-     * Human-readable error description for the user.
-     *
-     * @param message the raw error message (or null)
-     * @param host the server hostname being connected to
-     * @param attempts number of consecutive failed attempts so far
-     */
+    /** Returns a human-readable error string suitable for display to the user. */
     fun describeError(message: String?, host: String, attempts: Int): String {
         val msg = message ?: "Unknown error"
         return when {
@@ -95,19 +136,18 @@ object SshTunnelLogic {
         }
     }
 
-    /**
-     * Compute next exponential backoff.
-     * Starts at 1 second, doubles each call, caps at 60 seconds.
-     */
+    // ── Exponential backoff ─────────────────────────────────────────
+
+    /** Computes the next backoff delay: starts at 1 s, doubles each call, caps at 60 s. */
     fun backoff(currentBackoffSec: Int): BackoffResult {
         val delayMs = (currentBackoffSec * 1000L).coerceAtMost(60_000L)
         val nextBackoffSec = (currentBackoffSec * 2).coerceAtMost(60)
         return BackoffResult(delayMs, nextBackoffSec)
     }
 
-    /**
-     * Best-effort cellular generation label from link downstream speed.
-     */
+    // ── Cellular generation ─────────────────────────────────────────
+
+    /** Best-effort cellular generation label (2G/3G/4G/5G) from link downstream speed. */
     fun getCellularGenerationName(downSpeedKbps: Int): String {
         return when {
             downSpeedKbps >= 100_000 -> " (5G)"
