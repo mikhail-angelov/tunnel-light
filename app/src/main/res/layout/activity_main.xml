@@ -41,15 +41,31 @@
                 style="@style/Widget.AppCompat.Button.Borderless" />
         </LinearLayout>
 
-        <EditText
-            android:id="@+id/jumpInput"
+        <LinearLayout
+            android:id="@+id/jumpRow"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="user@jump:port  (optional)"
-            android:inputType="textNoSuggestions|textVisiblePassword"
-            android:singleLine="true"
+            android:orientation="horizontal"
             android:visibility="gone"
-            android:layout_marginBottom="12dp" />
+            android:layout_marginBottom="12dp">
+
+            <EditText
+                android:id="@+id/jumpInput"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:hint="user@jump:port  (optional)"
+                android:inputType="textNoSuggestions|textVisiblePassword"
+                android:singleLine="true" />
+
+            <Button
+                android:id="@+id/btnRemoveJump"
+                android:layout_width="48dp"
+                android:layout_height="wrap_content"
+                android:text="&#x2212;"
+                android:textSize="18sp"
+                style="@style/Widget.AppCompat.Button.Borderless" />
+        </LinearLayout>
 
         <LinearLayout
             android:layout_width="wrap_content"

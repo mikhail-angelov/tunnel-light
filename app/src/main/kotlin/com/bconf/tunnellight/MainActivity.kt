@@ -34,9 +34,11 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var statusView: TextView
     private lateinit var networkStatusView: TextView
+    private lateinit var jumpRow: LinearLayout
     private lateinit var jumpInput: EditText
     private lateinit var serverInput: EditText
     private lateinit var btnToggleJump: Button
+    private lateinit var btnRemoveJump: Button
     private lateinit var publicKeyView: TextView
     private lateinit var generatingLayout: LinearLayout
     private lateinit var btnStart: Button
@@ -77,9 +79,11 @@ class MainActivity : AppCompatActivity() {
 
         statusView = findViewById(R.id.status)
         networkStatusView = findViewById(R.id.networkStatus)
+        jumpRow = findViewById(R.id.jumpRow)
         jumpInput = findViewById(R.id.jumpInput)
         serverInput = findViewById(R.id.serverInput)
         btnToggleJump = findViewById(R.id.btnToggleJump)
+        btnRemoveJump = findViewById(R.id.btnRemoveJump)
         publicKeyView = findViewById(R.id.publicKey)
         generatingLayout = findViewById(R.id.generatingLayout)
         btnStart = findViewById(R.id.btnStart)
@@ -92,24 +96,19 @@ class MainActivity : AppCompatActivity() {
         serverInput.setText(prefs.getString("server", ""))
         jumpInput.setText(prefs.getString("jump", ""))
 
-        // Toggle jump host field; hiding also clears it so the tunnel uses no jump host
         btnToggleJump.setOnClickListener {
-            val shown = jumpInput.visibility == View.VISIBLE
-            if (shown) {
-                jumpInput.text.clear()
-                jumpInput.visibility = View.GONE
-                btnToggleJump.text = "+"
-            } else {
-                jumpInput.visibility = View.VISIBLE
-                btnToggleJump.text = "\u2212"
-                jumpInput.requestFocus()
-            }
+            jumpRow.visibility = View.VISIBLE
+            jumpInput.requestFocus()
         }
 
-        // Show jump field on start if a jump host was previously saved
-        if (prefs.getString("jump", "").isNullOrEmpty().not()) {
-            jumpInput.visibility = View.VISIBLE
-            btnToggleJump.text = "\u2212"
+        btnRemoveJump.setOnClickListener {
+            jumpInput.text.clear()
+            jumpRow.visibility = View.GONE
+        }
+
+        // Restore jump row if a jump host was previously saved
+        if (!prefs.getString("jump", "").isNullOrEmpty()) {
+            jumpRow.visibility = View.VISIBLE
         }
 
         generateKeyIfNeeded()
