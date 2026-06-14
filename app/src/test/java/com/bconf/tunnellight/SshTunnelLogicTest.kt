@@ -301,10 +301,11 @@ class SshTunnelLogicTest {
         assertEquals("user2", r!!.user)
         assertEquals("target.com", r.host)
         assertEquals(22, r.port)
-        assertNotNull(r.jump)
-        assertEquals("user1", r.jump!!.user)
-        assertEquals("jump.com", r.jump.host)
-        assertEquals(22, r.jump.port)
+        val jump = r.jump
+        assertNotNull(jump)
+        assertEquals("user1", jump!!.user)
+        assertEquals("jump.com", jump.host)
+        assertEquals(22, jump.port)
     }
 
     @Test
@@ -314,9 +315,11 @@ class SshTunnelLogicTest {
         assertEquals("u2", r!!.user)
         assertEquals("target.io", r.host)
         assertEquals(443, r.port)
-        assertEquals("u1", r.jump!!.user)
-        assertEquals("jump.io", r.jump.host)
-        assertEquals(22, r.jump.port)
+        val jump = r.jump
+        assertNotNull(jump)
+        assertEquals("u1", jump!!.user)
+        assertEquals("jump.io", jump.host)
+        assertEquals(22, jump.port)
     }
 
     @Test
@@ -326,9 +329,11 @@ class SshTunnelLogicTest {
         assertEquals("root", r!!.user)
         assertEquals("box.io", r.host)
         assertEquals(2222, r.port)
-        assertEquals("me", r.jump!!.user)
-        assertEquals("vps.me", r.jump.host)
-        assertEquals(22, r.jump.port)
+        val jump = r.jump
+        assertNotNull(jump)
+        assertEquals("me", jump!!.user)
+        assertEquals("vps.me", jump.host)
+        assertEquals(22, jump.port)
     }
 
     @Test
@@ -338,9 +343,11 @@ class SshTunnelLogicTest {
         assertEquals("bob", r!!.user)
         assertEquals("db.internal", r.host)
         assertEquals(3306, r.port)
-        assertEquals("jane", r.jump!!.user)
-        assertEquals("gw.example.com", r.jump.host)
-        assertEquals(444, r.jump.port)
+        val jump = r.jump
+        assertNotNull(jump)
+        assertEquals("jane", jump!!.user)
+        assertEquals("gw.example.com", jump.host)
+        assertEquals(444, jump.port)
     }
 
     @Test

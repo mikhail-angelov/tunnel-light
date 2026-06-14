@@ -231,7 +231,7 @@ class SshTunnelService : Service() {
                     s.setConfig("TCPKeepAlive", "yes")
                     s.setConfig("ServerAliveInterval", "20")
                     s.setConfig("ServerAliveCountMax", "3")
-                    if (jumpSess != null) s.setProxy(JumpProxy(jumpSess!!))
+                    if (jumpSess != null) s.setProxy(JumpProxy(jumpSess))
                     else if (connectVia != null) s.setSocketFactory(NetworkBoundSocketFactory(connectVia))
                     sess = s
                     s.connect(15_000)
