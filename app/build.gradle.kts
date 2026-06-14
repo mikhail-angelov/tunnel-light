@@ -47,6 +47,15 @@ android {
         jvmTarget = "17"
     }
 
+    testOptions {
+        unitTests.all {
+            // Forward jumpTest* system properties from Gradle JVM → test JVM
+            System.getProperties()
+                .filter { (k, _) -> k.toString().startsWith("jumpTest") }
+                .forEach { (k, v) -> it.systemProperty(k.toString(), v.toString()) }
+        }
+    }
+
     packaging {
         resources {
             excludes += "META-INF/BC*.SF"

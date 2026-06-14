@@ -464,22 +464,25 @@ private class NetworkBoundSocketFactory(
  * A JSch Proxy implementation that tunnels TCP connections through an existing SSH session.
  * Used for jump-host chaining: client → jump → target.
  */
-private class JumpProxy(private val session: Session) : Proxy {
+internal class JumpProxy(private val session: Session) : Proxy {
 
     private var channel: ChannelDirectTCPIP? = null
     private var inputStream: InputStream? = null
     private var outputStream: OutputStream? = null
 
-    override fun connect(socketFactory: JSchSocketFactory, host: String, port: Int, timeout: Int) {
+    override fun connect(socketFactory: JSchSocketFactory?, host: String, port: Int, timeout: Int) {
         val ch = session.openChannel("direct-tcpip") as ChannelDirectTCPIP
         ch.setHost(host)
         ch.setPort(port)
         ch.setOrgIPAddress("127.0.0.1")
         ch.setOrgPort(1)  // RFC 4254 §7.2: originator port must be non-zero
-        ch.connect(timeout)
-        channel = ch
+        // Retrieve streams BEFORE connect() so the internal pipe is wired up
+        // before the target's SSH banner arrives; data arriving while the pipe
+        // is null is silently dropped by JSch.
         inputStream = ch.inputStream
         outputStream = ch.outputStream
+        ch.connect(timeout)
+        channel = ch
     }
 
     override fun getInputStream() = inputStream
