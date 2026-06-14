@@ -17,21 +17,11 @@
             android:textStyle="bold"
             android:layout_marginBottom="20dp" />
 
-        <EditText
-            android:id="@+id/jumpInput"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:hint="user@jump:port  (optional)"
-            android:inputType="textNoSuggestions|textVisiblePassword"
-            android:singleLine="true"
-            android:visibility="gone"
-            android:layout_marginBottom="8dp" />
-
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="horizontal"
-            android:layout_marginBottom="12dp">
+            android:layout_marginBottom="8dp">
 
             <EditText
                 android:id="@+id/serverInput"
@@ -50,6 +40,16 @@
                 android:textSize="18sp"
                 style="@style/Widget.AppCompat.Button.Borderless" />
         </LinearLayout>
+
+        <EditText
+            android:id="@+id/jumpInput"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="user@jump:port  (optional)"
+            android:inputType="textNoSuggestions|textVisiblePassword"
+            android:singleLine="true"
+            android:visibility="gone"
+            android:layout_marginBottom="12dp" />
 
         <LinearLayout
             android:layout_width="wrap_content"
