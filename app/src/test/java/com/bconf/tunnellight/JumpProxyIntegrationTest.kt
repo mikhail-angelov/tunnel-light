@@ -36,7 +36,7 @@ class JumpProxyIntegrationTest {
     } catch (_: Exception) { false }
 
     @Test
-    fun `direct connection to jump host succeeds`() {
+    fun `direct single-server connection and command execution`() {
         assumeTrue("jump container not running on $jumpHost:$jumpPort", jumpAvailable())
 
         val jsch = JSch()
@@ -45,7 +45,17 @@ class JumpProxyIntegrationTest {
         sess.setConfig("StrictHostKeyChecking", "no")
         try {
             sess.connect(10_000)
-            assertTrue("Expected jump session to be connected", sess.isConnected)
+            assertTrue("Session must be connected", sess.isConnected)
+
+            val ch = sess.openChannel("exec") as com.jcraft.jsch.ChannelExec
+            ch.setCommand("echo hello-direct")
+            val out = java.io.ByteArrayOutputStream()
+            ch.outputStream = out
+            ch.connect(5_000)
+            Thread.sleep(300)
+            ch.disconnect()
+            val reply = out.toString(Charsets.UTF_8).trim()
+            assertTrue("Expected 'hello-direct' but got '$reply'", reply == "hello-direct")
         } finally {
             sess.disconnect()
         }
