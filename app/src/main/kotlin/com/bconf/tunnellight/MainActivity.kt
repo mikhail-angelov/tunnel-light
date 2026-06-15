@@ -265,7 +265,7 @@ class MainActivity : AppCompatActivity() {
             generatingLayout.visibility = View.GONE
             btnCopyKey.isEnabled = true
             btnRegenKey.visibility = View.VISIBLE
-            setTunnelUi(connected = SshTunnelService.isRunning)
+            syncTunnelUi()
         }
     }
 
