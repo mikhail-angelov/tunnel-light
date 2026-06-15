@@ -53,11 +53,7 @@ class MainActivity : AppCompatActivity() {
             val msg = intent.getStringExtra(SshTunnelService.EXTRA_STATUS) ?: return
             statusView.text = msg
             updateNetworkStatusView()
-            when {
-                msg.startsWith("Connected") -> setTunnelUi(connected = true)
-                msg.startsWith("Connecting") -> setTunnelUi(connecting = true)
-                else -> setTunnelUi(connected = false)
-            }
+            syncTunnelUi(msg)
         }
     }
 
@@ -157,8 +153,10 @@ class MainActivity : AppCompatActivity() {
 
         btnStop.setOnClickListener {
             stopService(Intent(this, SshTunnelService::class.java))
+            SshTunnelService.isActive = false
             statusView.text = "Stopped"
-            setTunnelUi(connected = false)
+            statusView.setTextColor(0xFFAAAAAA.toInt())
+            syncTunnelUi("Stopped")
         }
 
         btnCopyKey.setOnClickListener {
@@ -190,13 +188,9 @@ class MainActivity : AppCompatActivity() {
         updateNetworkStatusView()
         // Sync UI with service state in case we returned from background
         if (publicKeyView.visibility == View.VISIBLE) {
-            val running = SshTunnelService.isRunning
             val last = SshTunnelService.lastStatus
             if (last.isNotEmpty()) statusView.text = last
-            setTunnelUi(
-                connected = running,
-                connecting = !running && last.startsWith("Connecting")
-            )
+            syncTunnelUi(last)
         }
     }
 
@@ -236,9 +230,21 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun setTunnelUi(connected: Boolean = false, connecting: Boolean = false) {
-        btnStart.isEnabled = !connected && !connecting
-        btnStop.isEnabled = connected || connecting
+    private fun syncTunnelUi(msg: String = SshTunnelService.lastStatus) {
+        val connected  = msg.startsWith("Connected")
+        val active     = SshTunnelService.isActive  // thread alive incl. errors/backoff
+        btnStart.isEnabled = !active
+        btnStop.isEnabled  = active
+        // colour: green when connected, red on error, grey otherwise
+        statusView.setTextColor(when {
+            connected                     -> 0xFF44AA44.toInt()
+            active && !connected &&
+              (msg.contains("Error") || msg.contains("failed") ||
+               msg.contains("refused") || msg.contains("timeout") ||
+               msg.contains("timed out") || msg.contains("lost") ||
+               msg.contains("resolve") || msg.contains("unreachable")) -> 0xFFCC4444.toInt()
+            else                          -> 0xFFAAAAAA.toInt()
+        })
     }
 
     private fun updateNetworkStatusView() {

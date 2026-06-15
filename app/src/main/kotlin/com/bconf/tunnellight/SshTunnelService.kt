@@ -33,7 +33,8 @@ class SshTunnelService : Service() {
     companion object {
         const val ACTION_STATUS = "com.bconf.tunnellight.STATUS"
         const val EXTRA_STATUS = "status"
-        @Volatile var isRunning = false
+        @Volatile var isRunning = false  // true only while SOCKS5 proxy is up
+        @Volatile var isActive = false   // true while connection thread is alive (incl. errors/backoff)
         @Volatile var lastStatus = ""
         @Volatile var lastNetworkStatus = ""
     }
@@ -182,7 +183,7 @@ class SshTunnelService : Service() {
 
         connectionThread = Thread {
             val keyFile = File(filesDir, "id_ed25519")
-            var firstAttempt = true
+            isActive = true
 
             while (shouldRun) {
                 // Guard: no network → wait until it comes back
@@ -201,11 +202,6 @@ class SshTunnelService : Service() {
                 var jumpSess: Session? = null
                 var proxy: Socks5ProxyServer? = null
                 try {
-                    if (firstAttempt) {
-                        sendStatus("Connecting to $label\u2026")
-                    }
-                    firstAttempt = false
-
                     val jsch = JSch()
                     jsch.addIdentity(keyFile.absolutePath)
 
@@ -213,6 +209,8 @@ class SshTunnelService : Service() {
                     // Assign jumpSess BEFORE connect() so the finally block can
                     // always disconnect it even if connect() throws mid-handshake.
                     if (jumpUser != null && jumpHost != null) {
+                        sendStatus("Connecting to jump $jumpUser@$jumpHost\u2026")
+                        updateNotification("Connecting to jump $jumpUser@$jumpHost\u2026")
                         val js = jsch.getSession(jumpUser, jumpHost, jumpPort)
                         js.setConfig("StrictHostKeyChecking", "no")
                         js.setConfig("TCPKeepAlive", "yes")
@@ -222,6 +220,11 @@ class SshTunnelService : Service() {
                         jumpSess = js
                         jumpSession = js
                         js.connect(15_000)
+                        sendStatus("Jump connected \u2014 connecting to $user@$host\u2026")
+                        updateNotification("Jump connected \u2014 connecting to $user@$host\u2026")
+                    } else {
+                        sendStatus("Connecting to $user@$host\u2026")
+                        updateNotification("Connecting to $user@$host\u2026")
                     }
 
                     // Connect target (via jump proxy if chaining, else direct).
@@ -305,6 +308,7 @@ class SshTunnelService : Service() {
                 }
             }
 
+            isActive = false
             stopSelf()
         }.also { it.start() }
 
@@ -433,6 +437,7 @@ class SshTunnelService : Service() {
     override fun onDestroy() {
         shouldRun = false
         isRunning = false
+        isActive = false
         lastStatus = ""
         connectionThread?.interrupt()
         proxyServer?.stop()
