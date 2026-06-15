@@ -186,12 +186,10 @@ class MainActivity : AppCompatActivity() {
         }
         // Read latest network status from service
         updateNetworkStatusView()
-        // Sync UI with service state in case we returned from background
-        if (publicKeyView.visibility == View.VISIBLE) {
-            val last = SshTunnelService.lastStatus
-            if (last.isNotEmpty()) statusView.text = last
-            syncTunnelUi(last)
-        }
+        // Always sync tunnel status — needed after rotation (TextView doesn't save text)
+        val last = SshTunnelService.lastStatus
+        if (last.isNotEmpty()) statusView.text = last
+        syncTunnelUi(last)
     }
 
     override fun onPause() {
@@ -265,7 +263,9 @@ class MainActivity : AppCompatActivity() {
             generatingLayout.visibility = View.GONE
             btnCopyKey.isEnabled = true
             btnRegenKey.visibility = View.VISIBLE
-            syncTunnelUi()
+            val last = SshTunnelService.lastStatus
+            if (last.isNotEmpty()) statusView.text = last
+            syncTunnelUi(last)
         }
     }
 
