@@ -18,9 +18,11 @@ import com.jcraft.jsch.JSchException
 import com.jcraft.jsch.Proxy
 import com.jcraft.jsch.Session
 import com.jcraft.jsch.SocketFactory as JSchSocketFactory
+import java.io.DataInputStream
 import java.io.File
 import java.io.InputStream
 import java.io.OutputStream
+import java.util.concurrent.Executors
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
@@ -507,6 +509,7 @@ private class Socks5ProxyServer(
 ) {
     private var serverSocket: ServerSocket? = null
     @Volatile private var running = false
+    private val executor = Executors.newFixedThreadPool(20)
 
     fun start() {
         running = true
@@ -516,7 +519,7 @@ private class Socks5ProxyServer(
             while (running) {
                 try {
                     val client = ss.accept()
-                    Thread { handleClient(client) }.start()
+                    executor.execute { handleClient(client) }
                 } catch (e: Exception) {
                     if (running) e.printStackTrace()
                 }
@@ -526,12 +529,13 @@ private class Socks5ProxyServer(
 
     fun stop() {
         running = false
+        executor.shutdownNow()
         runCatching { serverSocket?.close() }
     }
 
     private fun handleClient(client: Socket) {
         try {
-            val inp = client.getInputStream()
+            val inp = DataInputStream(client.getInputStream())
             val out = client.getOutputStream()
 
             // ── SOCKS5 handshake ──
@@ -549,12 +553,12 @@ private class Socks5ProxyServer(
 
             val targetHost = when (atype) {
                 1 -> {
-                    val b = ByteArray(4); inp.read(b)
+                    val b = ByteArray(4); inp.readFully(b)
                     b.joinToString(".") { (it.toInt() and 0xFF).toString() }
                 }
                 3 -> {
                     val len = inp.read()
-                    val b = ByteArray(len); inp.read(b)
+                    val b = ByteArray(len); inp.readFully(b)
                     String(b)
                 }
                 else -> {
