@@ -234,7 +234,7 @@ class MainActivity : AppCompatActivity() {
         val connected  = msg.startsWith("Connected")
         val active     = SshTunnelService.isActive  // thread alive incl. errors/backoff
         btnStart.isEnabled = !active
-        btnStop.isEnabled  = active
+        btnStop.isEnabled  = true  // always a reliable kill switch
         // colour: green when connected, red on error, grey otherwise
         statusView.setTextColor(when {
             connected                     -> 0xFF44AA44.toInt()

@@ -171,6 +171,7 @@ class SshTunnelService : Service() {
 
         shouldRun = true
         isRunning = false
+        isActive = true   // set before any sendStatus so Stop is enabled immediately
         backoffSec = 1
         consecutiveFailures = 0
         initNetworkState()
@@ -183,7 +184,6 @@ class SshTunnelService : Service() {
 
         connectionThread = Thread {
             val keyFile = File(filesDir, "id_ed25519")
-            isActive = true
 
             while (shouldRun) {
                 // Guard: no network → wait until it comes back
