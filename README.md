@@ -18,7 +18,8 @@ Download the latest `app-release.apk` from the [Releases](../../releases) page a
 ## First launch
 
 On first launch the app generates an **ED25519 key pair** stored privately on your device. The public key is shown at the bottom of the screen — you need to copy it to your server before the tunnel will connect.
-<img height="400" alt="image" src="https://github.com/user-attachments/assets/e37d9cdc-07ea-4cfa-9808-e78ceee99d8b" />
+<img  height="800" alt="telegram-cloud-photo-size-2-5294305391946701483-y" src="https://github.com/user-attachments/assets/afbff67d-fcc4-4d65-92b3-994eac6011fb" />
+
 
 ---
 
