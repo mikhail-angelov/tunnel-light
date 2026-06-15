@@ -216,8 +216,8 @@ class SshTunnelService : Service() {
                         val js = jsch.getSession(jumpUser, jumpHost, jumpPort)
                         js.setConfig("StrictHostKeyChecking", "no")
                         js.setConfig("TCPKeepAlive", "yes")
-                        js.setConfig("ServerAliveInterval", "20")
-                        js.setConfig("ServerAliveCountMax", "3")
+                        js.setConfig("ServerAliveInterval", "10")
+                        js.setConfig("ServerAliveCountMax", "2")
                         if (connectVia != null) js.setSocketFactory(NetworkBoundSocketFactory(connectVia))
                         jumpSess = js
                         jumpSession = js
@@ -234,8 +234,8 @@ class SshTunnelService : Service() {
                     val s = jsch.getSession(user, host, port)
                     s.setConfig("StrictHostKeyChecking", "no")
                     s.setConfig("TCPKeepAlive", "yes")
-                    s.setConfig("ServerAliveInterval", "20")
-                    s.setConfig("ServerAliveCountMax", "3")
+                    s.setConfig("ServerAliveInterval", "10")
+                    s.setConfig("ServerAliveCountMax", "2")
                     if (jumpSess != null) s.setProxy(JumpProxy(jumpSess))
                     else if (connectVia != null) s.setSocketFactory(NetworkBoundSocketFactory(connectVia))
                     sess = s
@@ -535,6 +535,7 @@ private class Socks5ProxyServer(
 
     private fun handleClient(client: Socket) {
         try {
+            client.soTimeout = 15_000
             val inp = DataInputStream(client.getInputStream())
             val out = client.getOutputStream()
 
@@ -574,6 +575,10 @@ private class Socks5ProxyServer(
             }
 
             // ── Open SSH channel ──
+            if (!session.isConnected) {
+                out.write(byteArrayOf(5, 4, 0, 1, 0, 0, 0, 0, 0, 0)); out.flush()
+                client.close(); return
+            }
             val ch = session.openChannel("direct-tcpip") as ChannelDirectTCPIP
             ch.setHost(targetHost)
             ch.setPort(targetPort)
@@ -581,7 +586,7 @@ private class Socks5ProxyServer(
             ch.setOrgPort(listenPort)
 
             try {
-                ch.connect(10_000)
+                ch.connect(5_000)
             } catch (e: Exception) {
                 out.write(byteArrayOf(5, 5, 0, 1, 0, 0, 0, 0, 0, 0)); out.flush()
                 client.close(); return
