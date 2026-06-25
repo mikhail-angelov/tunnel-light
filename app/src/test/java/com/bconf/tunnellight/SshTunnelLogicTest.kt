@@ -369,4 +369,60 @@ class SshTunnelLogicTest {
         assertEquals("server.org", r.host)
         assertEquals(8080, r.port)
     }
+
+    // ── VLESS import links ─────────────────────────────────────────
+
+    @Test
+    fun `parse vless xhttp reality link`() {
+        val r = SshTunnelLogic.parseVlessUri(
+            "vless://9629c78b-4e77-444c-9747-d4e44488c811@vpn.example.com:443" +
+                "?type=xhttp&security=reality&pbk=abc_DEF-123&sni=github.com" +
+                "&sid=0123456789abcdef&fp=chrome&path=%2Ftunnel-light-xhttp#Tunnel-Light"
+        )
+
+        assertNotNull(r)
+        assertEquals("vpn.example.com", r!!.server)
+        assertEquals(443, r.port)
+        assertEquals("9629c78b-4e77-444c-9747-d4e44488c811", r.uuid)
+        assertEquals("abc_DEF-123", r.publicKey)
+        assertEquals("github.com", r.sni)
+        assertEquals("0123456789abcdef", r.shortId)
+        assertEquals("/tunnel-light-xhttp", r.path)
+    }
+
+    @Test
+    fun `parse vless link defaults port to 443`() {
+        val r = SshTunnelLogic.parseVlessUri(
+            "vless://9629c78b-4e77-444c-9747-d4e44488c811@vpn.example.com" +
+                "?type=xhttp&security=reality&pbk=key&sni=github.com&sid=01&path=%2Fx"
+        )
+
+        assertNotNull(r)
+        assertEquals(443, r!!.port)
+    }
+
+    @Test
+    fun `reject non vless link`() {
+        assertNull(SshTunnelLogic.parseVlessUri("https://example.com"))
+    }
+
+    @Test
+    fun `reject vless link with unsupported transport`() {
+        assertNull(
+            SshTunnelLogic.parseVlessUri(
+                "vless://9629c78b-4e77-444c-9747-d4e44488c811@vpn.example.com:443" +
+                    "?type=tcp&security=reality&pbk=key&sni=github.com&sid=01&path=%2Fx"
+            )
+        )
+    }
+
+    @Test
+    fun `reject vless link without reality security`() {
+        assertNull(
+            SshTunnelLogic.parseVlessUri(
+                "vless://9629c78b-4e77-444c-9747-d4e44488c811@vpn.example.com:443" +
+                    "?type=xhttp&security=tls&pbk=key&sni=github.com&sid=01&path=%2Fx"
+            )
+        )
+    }
 }

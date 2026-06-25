@@ -1,9 +1,22 @@
 package com.bconf.tunnellight
 
+import java.net.URI
+import java.net.URLDecoder
+
 /**
  * Pure functions for SSH tunnel logic — no Android dependencies, fully testable.
  */
 object SshTunnelLogic {
+
+    data class XrayConfig(
+        val server: String,
+        val port: Int,
+        val uuid: String,
+        val publicKey: String,
+        val sni: String,
+        val shortId: String,
+        val path: String
+    )
 
     data class HostInfo(val user: String, val host: String, val port: Int)
 
@@ -157,4 +170,44 @@ object SshTunnelLogic {
             else -> ""
         }
     }
+
+    fun parseVlessUri(input: String): XrayConfig? {
+        val uri = runCatching { URI(input.trim()) }.getOrNull() ?: return null
+        if (!uri.scheme.equals("vless", ignoreCase = true)) return null
+
+        val uuid = uri.rawUserInfo?.urlDecode()?.trim().orEmpty()
+        val server = uri.host?.trim().orEmpty()
+        val port = if (uri.port > 0) uri.port else 443
+        val query = parseQuery(uri.rawQuery.orEmpty())
+
+        if (!query["type"].equals("xhttp", ignoreCase = true)) return null
+        if (!query["security"].equals("reality", ignoreCase = true)) return null
+
+        return XrayConfig(
+            server = server,
+            port = port,
+            uuid = uuid,
+            publicKey = query["pbk"].orEmpty(),
+            sni = query["sni"].orEmpty(),
+            shortId = query["sid"].orEmpty(),
+            path = query["path"].orEmpty()
+        )
+    }
+
+    private fun parseQuery(rawQuery: String): Map<String, String> {
+        if (rawQuery.isEmpty()) return emptyMap()
+        return rawQuery.split("&")
+            .mapNotNull { part ->
+                val separator = part.indexOf("=")
+                if (separator < 0) {
+                    part.urlDecode() to ""
+                } else {
+                    part.substring(0, separator).urlDecode() to
+                        part.substring(separator + 1).urlDecode()
+                }
+            }
+            .toMap()
+    }
+
+    private fun String.urlDecode(): String = URLDecoder.decode(this, "UTF-8")
 }

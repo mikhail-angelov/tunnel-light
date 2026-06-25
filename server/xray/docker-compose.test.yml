@@ -1,0 +1,11 @@
+services:
+  xray-client:
+    image: ghcr.io/xtls/xray-core:latest
+    profiles: ["test"]
+    command: ["run", "-config", "/etc/xray/client-config.json"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "${XRAY_CLIENT_SOCKS_PORT:-11080}:1080/tcp"
+    volumes:
+      - ./generated/client-config.json:/etc/xray/client-config.json:ro

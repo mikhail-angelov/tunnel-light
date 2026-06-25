@@ -12,6 +12,60 @@ NETWORK   := ssh-test-net
 JUMP_PORT := 2222
 USER      := tunnel
 
+# ── Xray VPS install ───────────────────────────────────────────────────────
+# Reads HOST from .env by default:
+#
+#   HOST=root@1.2.3.4
+#
+# Usage:
+#   make install
+#   make install HOST=root@1.2.3.4
+#   make install REMOTE_DIR=/opt/tunnel-light-xray
+
+ifneq (,$(wildcard .env))
+include .env
+export
+endif
+
+REMOTE_DIR ?= /opt/tunnel-light-xray
+SSH ?= ssh
+SCP ?= scp
+
+.PHONY: install client-link client-qr
+
+client-link:
+	@test -n "$(HOST)" || (echo "HOST is not set. Add HOST=root@your-vps-ip to .env or run make client-link HOST=root@your-vps-ip" >&2; exit 1)
+	@$(SSH) $(HOST) 'cd "$(REMOTE_DIR)" && HOST="$(HOST)" ./render-share-link.sh'
+
+client-qr:
+	@test -n "$(HOST)" || (echo "HOST is not set. Add HOST=root@your-vps-ip to .env or run make client-qr HOST=root@your-vps-ip" >&2; exit 1)
+	@$(SSH) $(HOST) 'cd "$(REMOTE_DIR)" && HOST="$(HOST)" ./render-share-link.sh --qr'
+
+install:
+	@test -n "$(HOST)" || (echo "HOST is not set. Add HOST=root@your-vps-ip to .env or run make install HOST=root@your-vps-ip" >&2; exit 1)
+	@test -f server/xray/docker-compose.yml || (echo "server/xray/docker-compose.yml not found" >&2; exit 1)
+	@echo "==> Installing Xray backend to $(HOST):$(REMOTE_DIR)"
+	@$(SSH) $(HOST) 'sudo mkdir -p "$(REMOTE_DIR)" && sudo chown "$$(id -u):$$(id -g)" "$(REMOTE_DIR)"'
+	@$(SCP) -r server/xray/.env.example server/xray/docker-compose.yml server/xray/render-config.sh server/xray/render-share-link.sh server/xray/README.md $(HOST):$(REMOTE_DIR)/
+	@$(SSH) $(HOST) 'cd "$(REMOTE_DIR)" && \
+		if ! command -v docker >/dev/null 2>&1; then \
+			sudo apt-get update && sudo apt-get install -y ca-certificates curl docker.io docker-compose-plugin; \
+			sudo systemctl enable --now docker; \
+		fi && \
+		if ! command -v qrencode >/dev/null 2>&1; then \
+			sudo apt-get update && sudo apt-get install -y qrencode; \
+		fi && \
+		if [ ! -f .env ]; then cp .env.example .env; fi && \
+		chmod +x render-config.sh render-share-link.sh && \
+		if grep -q "replace-with-" .env; then \
+			echo "Created $(REMOTE_DIR)/.env on $(HOST). Fill UUID and Reality keys, then run make install again."; \
+			exit 2; \
+		fi && \
+		./render-config.sh && \
+		docker compose run --rm --entrypoint xray xray run -test -config /etc/xray/config.json && \
+		docker compose up -d'
+	@echo "==> Done. Logs: $(SSH) $(HOST) 'cd $(REMOTE_DIR) && docker compose logs -f'"
+
 .PHONY: test-jump test-jump-clean
 
 test-jump: test-jump-clean

@@ -1,0 +1,10 @@
+services:
+  xray:
+    image: ghcr.io/xtls/xray-core:latest
+    container_name: tunnel-light-xray
+    restart: unless-stopped
+    command: ["run", "-config", "/etc/xray/config.json"]
+    ports:
+      - "${XRAY_PORT:-443}:443/tcp"
+    volumes:
+      - ./generated/config.json:/etc/xray/config.json:ro

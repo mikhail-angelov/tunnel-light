@@ -1,71 +1,85 @@
-# SSH Tunnel Light
+# Tunnel Light
 
-A simple Android app that routes your traffic through an SSH server via a SOCKS5 proxy on **127.0.0.1:1080**.
+Android app that starts a local SOCKS5 proxy on **127.0.0.1:1080** and sends traffic through an Xray backend using **VLESS + REALITY + XHTTP**.
 
-No root required. No VPN permission. Just SSH.
+No root required. No Android VPN permission. Apps must be configured to use the local SOCKS5 proxy.
 
----
+## Server
 
-## Install
+The Docker Compose backend lives in `server/xray`.
 
-Download the latest `app-release.apk` from the [Releases](../../releases) page and open it on your device.
-
-> You may need to allow installation from unknown sources:  
-> **Settings → Apps → Special app access → Install unknown apps**
-
----
-
-## First launch
-
-On first launch the app generates an **ED25519 key pair** stored privately on your device. The public key is shown at the bottom of the screen — you need to copy it to your server before the tunnel will connect.
-<img  height="800" alt="telegram-cloud-photo-size-2-5294305391946701483-y" src="https://github.com/user-attachments/assets/afbff67d-fcc4-4d65-92b3-994eac6011fb" />
-
-
----
-
-## Setup
-
-### 1. Copy your public key to the server
-
-Tap **Copy key** and add the key to `~/.ssh/authorized_keys` on your SSH server:
+Install to a VPS from this repo:
 
 ```bash
-echo "ssh-ed25519 AAAA...your-key... ssh-tunnel@android" >> ~/.ssh/authorized_keys
+echo 'HOST=root@your-vps-ip' > .env
+make install
 ```
 
-### 2. Make sure the server allows key authentication
+On the first run, `make install` creates `/opt/tunnel-light-xray/.env` on the VPS and stops. Fill the UUID and REALITY keys there, then run `make install` again.
 
-In `/etc/ssh/sshd_config`:
+Generate server values on the VPS:
 
-```
-PubkeyAuthentication yes
-```
-
-Restart SSH if you changed it: `sudo systemctl restart sshd`
-
-### 3. Enter the server address
-
-In the app, type your server in the field at the top:
-
-```
-user@your-server.com
+```bash
+cd /opt/tunnel-light-xray
+docker run --rm ghcr.io/xtls/xray-core:latest uuid
+docker run --rm ghcr.io/xtls/xray-core:latest x25519
 ```
 
-Or with a custom port:
+The Android app needs:
 
+```bash
+cd /opt/tunnel-light-xray
+./render-share-link.sh
 ```
-user@your-server.com:2222
+
+This prints a `vless://` import link and writes it to `generated/client-link.txt`.
+Any Android QR scanner that opens links can pass a scanned `vless://` QR code to
+Tunnel Light.
+
+If `qrencode` is installed on the VPS, print a terminal QR code:
+
+```bash
+./render-share-link.sh --qr
 ```
 
-### 4. Start the tunnel
+From a local checkout with `HOST` set in `.env`, you can also run:
 
-Tap **Start**. The status line will show **Connected — SOCKS5 on 127.0.0.1:1080** when the tunnel is up.
+```bash
+make client-link
+make client-qr
+```
 
----
+The link contains:
 
-## Using the proxy
+| Field | Source |
+|---|---|
+| Server | `HOST`, or `XRAY_SERVER_ADDRESS` if set |
+| Port | `XRAY_SERVER_PORT` or `XRAY_PORT` |
+| UUID | `XRAY_USER_UUID` |
+| Public key | `XRAY_REALITY_PUBLIC_KEY` |
+| SNI | `XRAY_REALITY_SERVER_NAME` |
+| shortId | `XRAY_REALITY_SHORT_ID` |
+| XHTTP path | `XRAY_XHTTP_PATH` |
 
-Once connected, configure any app that supports SOCKS5 to use:
+## Android
+
+The app includes `app/libs/libv2ray.aar`, built from `2dust/AndroidLibXrayLite`.
+
+Build:
+
+```bash
+JAVA_HOME=/Library/Java/JavaVirtualMachines/zulu-17.jdk/Contents/Home ./gradlew :app:assembleDebug
+```
+
+Install on a connected device or emulator:
+
+```bash
+JAVA_HOME=/Library/Java/JavaVirtualMachines/zulu-17.jdk/Contents/Home ./gradlew :app:installDebug
+```
+
+## Using The Proxy
+
+Configure any app that supports SOCKS5:
 
 | Setting | Value |
 |---|---|
@@ -73,38 +87,9 @@ Once connected, configure any app that supports SOCKS5 to use:
 | Host | 127.0.0.1 |
 | Port | 1080 |
 
-**Telegram:**  
-Settings → Data and Storage → Proxy Settings → Add Proxy → SOCKS5  
-Host `127.0.0.1`, port `1080`, no username or password.
-<img height="300" alt="image" src="https://github.com/user-attachments/assets/ee1a9d30-c423-4049-863e-ed22dd631620" />
+The tunnel runs as a foreground service. Tap **Stop** in the app to disconnect.
 
-**Firefox for Android:**  
-Settings → General → Network Settings → Manual proxy → SOCKS5, host `127.0.0.1`, port `1080`.
+## Import Config
 
----
-
-## The tunnel keeps running in the background
-
-The tunnel runs as a foreground service — you will see a persistent notification while it is active. Pressing the back button or switching apps does **not** stop the tunnel. Tap **Stop** in the app to disconnect.
-
----
-
-## Regenerating your key
-
-If you need a new key pair (e.g. your device was lost), tap **Regenerate key** and confirm. A new key will be generated and shown. You must add the new public key to `authorized_keys` on your server — the old key will stop working.
-
----
-
-## Troubleshooting
-
-**Status shows "Error: …"**  
-- Check that the public key is in `~/.ssh/authorized_keys` on the server  
-- Make sure `PubkeyAuthentication yes` is set in `sshd_config`  
-- Verify the server address and port are correct  
-
-**Tunnel connects but traffic doesn't route**  
-- Confirm the app you're using is actually configured to use the SOCKS5 proxy  
-- Some apps ignore system proxy settings — you need per-app proxy configuration  
-
-**Tunnel stops after a few minutes**  
-- Open the app and tap **Open Settings** when prompted about battery optimization, then select **Unrestricted** for this app  
+Scan or open a `vless://` link on Android. Tunnel Light is registered as a
+handler for VLESS links, imports the config, and saves it for future starts.

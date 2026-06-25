@@ -1,8 +1,6 @@
 package com.bconf.tunnellight
 
 import android.content.BroadcastReceiver
-import android.content.ClipData
-import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -14,37 +12,31 @@ import android.provider.Settings
 import android.view.View
 import android.widget.Button
 import android.widget.EditText
-import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
-import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
-import org.bouncycastle.crypto.generators.Ed25519KeyPairGenerator
-import org.bouncycastle.crypto.params.Ed25519KeyGenerationParameters
-import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters
-import org.bouncycastle.crypto.params.Ed25519PublicKeyParameters
-import java.io.ByteArrayOutputStream
-import java.io.File
-import java.security.SecureRandom
-import java.util.Base64
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var statusView: TextView
     private lateinit var networkStatusView: TextView
-    private lateinit var jumpRow: LinearLayout
-    private lateinit var jumpInput: EditText
     private lateinit var serverInput: EditText
-    private lateinit var btnToggleJump: Button
-    private lateinit var btnRemoveJump: Button
-    private lateinit var publicKeyView: TextView
-    private lateinit var generatingLayout: LinearLayout
+    private lateinit var portInput: EditText
+    private lateinit var uuidInput: EditText
+    private lateinit var publicKeyInput: EditText
+    private lateinit var sniInput: EditText
+    private lateinit var shortIdInput: EditText
+    private lateinit var pathInput: EditText
     private lateinit var btnStart: Button
     private lateinit var btnStop: Button
-    private lateinit var btnCopyKey: Button
-    private lateinit var btnRegenKey: Button
+    private lateinit var btnToggleSettings: Button
+    private lateinit var settingsPanel: ScrollView
+    private lateinit var btnToggleLogs: Button
+    private lateinit var logsPanel: ScrollView
+    private lateinit var logsText: TextView
 
     private val prefs by lazy { getSharedPreferences("tunnel", MODE_PRIVATE) }
 
@@ -52,6 +44,7 @@ class MainActivity : AppCompatActivity() {
         override fun onReceive(context: Context, intent: Intent) {
             val msg = intent.getStringExtra(SshTunnelService.EXTRA_STATUS) ?: return
             statusView.text = msg
+            intent.getStringExtra(SshTunnelService.EXTRA_LOGS)?.let { updateLogs(it) }
             updateNetworkStatusView()
             syncTunnelUi(msg)
         }
@@ -63,11 +56,9 @@ class MainActivity : AppCompatActivity() {
         if (granted) {
             checkBatteryOptimization()
         } else {
-            statusView.text = "Notification permission denied — tunnel may not start on Android 14+"
+            statusView.text = "Notification permission denied; tunnel may not start on Android 14+"
         }
     }
-
-    // ── Network status is read from SshTunnelService.lastNetworkStatus ──
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -75,40 +66,27 @@ class MainActivity : AppCompatActivity() {
 
         statusView = findViewById(R.id.status)
         networkStatusView = findViewById(R.id.networkStatus)
-        jumpRow = findViewById(R.id.jumpRow)
-        jumpInput = findViewById(R.id.jumpInput)
         serverInput = findViewById(R.id.serverInput)
-        btnToggleJump = findViewById(R.id.btnToggleJump)
-        btnRemoveJump = findViewById(R.id.btnRemoveJump)
-        publicKeyView = findViewById(R.id.publicKey)
-        generatingLayout = findViewById(R.id.generatingLayout)
+        portInput = findViewById(R.id.portInput)
+        uuidInput = findViewById(R.id.uuidInput)
+        publicKeyInput = findViewById(R.id.publicKeyInput)
+        sniInput = findViewById(R.id.sniInput)
+        shortIdInput = findViewById(R.id.shortIdInput)
+        pathInput = findViewById(R.id.pathInput)
         btnStart = findViewById(R.id.btnStart)
         btnStop = findViewById(R.id.btnStop)
-        btnCopyKey = findViewById(R.id.btnCopyKey)
-        btnRegenKey = findViewById(R.id.btnRegenKey)
+        btnToggleSettings = findViewById(R.id.btnToggleSettings)
+        settingsPanel = findViewById(R.id.settingsPanel)
+        btnToggleLogs = findViewById(R.id.btnToggleLogs)
+        logsPanel = findViewById(R.id.logsPanel)
+        logsText = findViewById(R.id.logsText)
 
-        btnStart.isEnabled = false
-        btnStop.isEnabled = false
-        serverInput.setText(prefs.getString("server", ""))
-        jumpInput.setText(prefs.getString("jump", ""))
-
-        btnToggleJump.setOnClickListener {
-            jumpRow.visibility = View.VISIBLE
-            jumpInput.requestFocus()
-        }
-
-        btnRemoveJump.setOnClickListener {
-            jumpInput.text.clear()
-            jumpRow.visibility = View.GONE
-        }
-
-        // Restore jump row if a jump host was previously saved
-        if (!prefs.getString("jump", "").isNullOrEmpty()) {
-            jumpRow.visibility = View.VISIBLE
-        }
-
-        generateKeyIfNeeded()
-        requestPermissionsIfNeeded()
+        loadSavedConfig()
+        btnToggleSettings.text = "Settings"
+        btnToggleLogs.text = "Logs"
+        restoreRuntimeUi(savedInstanceState)
+        handleImportIntent(intent)
+        requestPermissionsIfNeeded(showBatteryDialog = savedInstanceState == null)
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
@@ -122,57 +100,42 @@ class MainActivity : AppCompatActivity() {
         })
 
         btnStart.setOnClickListener {
-            val targetStr = serverInput.text.toString().trim()
-            val target = SshTunnelLogic.parseServer(targetStr) ?: run {
-                statusView.text = "Invalid target format — use user@host:port"
-                return@setOnClickListener
-            }
-            val jumpStr = jumpInput.text.toString().trim()
-            val jumpFromField = if (jumpStr.isNotEmpty()) {
-                SshTunnelLogic.parseServer(jumpStr) ?: run {
-                    statusView.text = "Invalid jump format — use user@host:port"
-                    return@setOnClickListener
-                }
-            } else null
-            // jumpInput takes priority; fall back to chain syntax in serverInput
-            val eJumpUser = jumpFromField?.user ?: target.jump?.user
-            val eJumpHost = jumpFromField?.host ?: target.jump?.host
-            val eJumpPort = jumpFromField?.port ?: target.jump?.port ?: 22
-
-            prefs.edit().putString("server", targetStr).putString("jump", jumpStr).apply()
+            val config = readConfigFromUi() ?: return@setOnClickListener
+            saveConfig(config)
             startForegroundService(
                 Intent(this, SshTunnelService::class.java)
-                    .putExtra("user", target.user)
-                    .putExtra("host", target.host)
-                    .putExtra("port", target.port)
-                    .putExtra("jump_user", eJumpUser)
-                    .putExtra("jump_host", eJumpHost)
-                    .putExtra("jump_port", eJumpPort)
+                    .putExtra(SshTunnelService.EXTRA_SERVER_ADDRESS, config.server)
+                    .putExtra(SshTunnelService.EXTRA_SERVER_PORT, config.port)
+                    .putExtra(SshTunnelService.EXTRA_UUID, config.uuid)
+                    .putExtra(SshTunnelService.EXTRA_PUBLIC_KEY, config.publicKey)
+                    .putExtra(SshTunnelService.EXTRA_SNI, config.sni)
+                    .putExtra(SshTunnelService.EXTRA_SHORT_ID, config.shortId)
+                    .putExtra(SshTunnelService.EXTRA_XHTTP_PATH, config.path)
             )
         }
 
         btnStop.setOnClickListener {
             stopService(Intent(this, SshTunnelService::class.java))
             SshTunnelService.isActive = false
+            SshTunnelService.isRunning = false
             statusView.text = "Stopped"
             statusView.setTextColor(0xFFAAAAAA.toInt())
             syncTunnelUi("Stopped")
         }
 
-        btnCopyKey.setOnClickListener {
-            val cm = getSystemService(ClipboardManager::class.java)
-            cm.setPrimaryClip(ClipData.newPlainText("ssh public key", publicKeyView.text))
-            Toast.makeText(this, "Copied to clipboard", Toast.LENGTH_SHORT).show()
+        btnToggleSettings.setOnClickListener {
+            togglePanel(settingsPanel, btnToggleSettings, "Settings")
         }
 
-        btnRegenKey.setOnClickListener {
-            AlertDialog.Builder(this)
-                .setTitle("Regenerate key?")
-                .setMessage("This will create a new key pair. You will need to add the new public key to ~/.ssh/authorized_keys on your server — the tunnel will stop working until you do.")
-                .setPositiveButton("Regenerate") { _, _ -> forceRegenerateKey() }
-                .setNegativeButton("Cancel", null)
-                .show()
+        btnToggleLogs.setOnClickListener {
+            togglePanel(logsPanel, btnToggleLogs, "Logs")
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleImportIntent(intent)
     }
 
     override fun onResume() {
@@ -184,12 +147,7 @@ class MainActivity : AppCompatActivity() {
             @Suppress("UnspecifiedRegisterReceiverFlag")
             registerReceiver(statusReceiver, filter)
         }
-        // Read latest network status from service
-        updateNetworkStatusView()
-        // Always sync tunnel status — needed after rotation (TextView doesn't save text)
-        val last = SshTunnelService.lastStatus
-        if (last.isNotEmpty()) statusView.text = last
-        syncTunnelUi(last)
+        restoreRuntimeUi(preserveCurrentStatus = true)
     }
 
     override fun onPause() {
@@ -197,7 +155,14 @@ class MainActivity : AppCompatActivity() {
         unregisterReceiver(statusReceiver)
     }
 
-    private fun requestPermissionsIfNeeded() {
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putString(KEY_STATUS_TEXT, statusView.text.toString())
+        outState.putBoolean(KEY_SETTINGS_VISIBLE, settingsPanel.visibility == View.VISIBLE)
+        outState.putBoolean(KEY_LOGS_VISIBLE, logsPanel.visibility == View.VISIBLE)
+        super.onSaveInstanceState(outState)
+    }
+
+    private fun requestPermissionsIfNeeded(showBatteryDialog: Boolean) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
                 != android.content.pm.PackageManager.PERMISSION_GRANTED
@@ -206,7 +171,7 @@ class MainActivity : AppCompatActivity() {
                 return
             }
         }
-        checkBatteryOptimization()
+        if (showBatteryDialog) checkBatteryOptimization()
     }
 
     private fun checkBatteryOptimization() {
@@ -214,7 +179,7 @@ class MainActivity : AppCompatActivity() {
         if (!pm.isIgnoringBatteryOptimizations(packageName)) {
             AlertDialog.Builder(this)
                 .setTitle("Battery Optimization")
-                .setMessage("To keep the SSH tunnel running in the background, disable battery optimization for this app.")
+                .setMessage("Disable battery optimization for this app to keep the proxy running in the background.")
                 .setPositiveButton("Open Settings") { _, _ ->
                     startActivity(
                         Intent(
@@ -228,20 +193,140 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun loadSavedConfig() {
+        migrateDefaultConfigIfNeeded()
+
+        serverInput.setText(prefs.getString(PREF_SERVER, DEFAULT_SERVER))
+        portInput.setText(prefs.getInt(PREF_PORT, DEFAULT_PORT).toString())
+        uuidInput.setText(prefs.getString(PREF_UUID, DEFAULT_UUID))
+        publicKeyInput.setText(prefs.getString(PREF_PUBLIC_KEY, DEFAULT_PUBLIC_KEY))
+        sniInput.setText(prefs.getString(PREF_SNI, DEFAULT_SNI))
+        shortIdInput.setText(prefs.getString(PREF_SHORT_ID, DEFAULT_SHORT_ID))
+        pathInput.setText(prefs.getString(PREF_XHTTP_PATH, DEFAULT_XHTTP_PATH))
+    }
+
+    private fun migrateDefaultConfigIfNeeded() {
+        if (prefs.getInt(PREF_CONFIG_VERSION, 0) >= DEFAULT_CONFIG_VERSION) return
+        prefs.edit()
+            .putInt(PREF_CONFIG_VERSION, DEFAULT_CONFIG_VERSION)
+            .putString(PREF_SERVER, DEFAULT_SERVER)
+            .putInt(PREF_PORT, DEFAULT_PORT)
+            .putString(PREF_UUID, DEFAULT_UUID)
+            .putString(PREF_PUBLIC_KEY, DEFAULT_PUBLIC_KEY)
+            .putString(PREF_SNI, DEFAULT_SNI)
+            .putString(PREF_SHORT_ID, DEFAULT_SHORT_ID)
+            .putString(PREF_XHTTP_PATH, DEFAULT_XHTTP_PATH)
+            .apply()
+    }
+
+    private fun readConfigFromUi(): SshTunnelLogic.XrayConfig? {
+        val server = serverInput.text.toString().trim()
+        val port = portInput.text.toString().trim().toIntOrNull()
+        val uuid = uuidInput.text.toString().trim()
+        val publicKey = publicKeyInput.text.toString().trim()
+        val sni = sniInput.text.toString().trim()
+        val shortId = shortIdInput.text.toString().trim()
+        val path = pathInput.text.toString().trim()
+
+        val error = validateXrayConfig(server, port, uuid, publicKey, sni, shortId, path)
+        if (error != null) {
+            statusView.text = error
+            statusView.setTextColor(0xFFCC4444.toInt())
+            return null
+        }
+
+        val validPort = port ?: return null
+        return SshTunnelLogic.XrayConfig(server, validPort, uuid, publicKey, sni, shortId, path)
+    }
+
+    private fun saveConfig(config: SshTunnelLogic.XrayConfig) {
+        prefs.edit()
+            .putInt(PREF_CONFIG_VERSION, DEFAULT_CONFIG_VERSION)
+            .putString(PREF_SERVER, config.server)
+            .putInt(PREF_PORT, config.port)
+            .putString(PREF_UUID, config.uuid)
+            .putString(PREF_PUBLIC_KEY, config.publicKey)
+            .putString(PREF_SNI, config.sni)
+            .putString(PREF_SHORT_ID, config.shortId)
+            .putString(PREF_XHTTP_PATH, config.path)
+            .apply()
+    }
+
+    private fun handleImportIntent(intent: Intent?) {
+        val link = intent?.dataString ?: return
+        val config = SshTunnelLogic.parseVlessUri(link)
+        if (config == null) {
+            if (intent.action == Intent.ACTION_VIEW) {
+                statusView.text = "Invalid VLESS config link"
+                statusView.setTextColor(0xFFCC4444.toInt())
+            }
+            return
+        }
+
+        val error = validateXrayConfig(
+            config.server,
+            config.port,
+            config.uuid,
+            config.publicKey,
+            config.sni,
+            config.shortId,
+            config.path
+        )
+        if (error != null) {
+            statusView.text = error
+            statusView.setTextColor(0xFFCC4444.toInt())
+            return
+        }
+
+        saveConfig(config)
+        writeConfigToUi(config)
+        statusView.text = "Config imported"
+        syncTunnelUi(statusView.text.toString())
+        statusView.setTextColor(0xFF44AA44.toInt())
+    }
+
+    private fun writeConfigToUi(config: SshTunnelLogic.XrayConfig) {
+        serverInput.setText(config.server)
+        portInput.setText(config.port.toString())
+        uuidInput.setText(config.uuid)
+        publicKeyInput.setText(config.publicKey)
+        sniInput.setText(config.sni)
+        shortIdInput.setText(config.shortId)
+        pathInput.setText(config.path)
+    }
+
+    private fun validateXrayConfig(
+        server: String,
+        port: Int?,
+        uuid: String,
+        publicKey: String,
+        sni: String,
+        shortId: String,
+        path: String
+    ): String? {
+        return when {
+            server.isEmpty() -> "Server is required"
+            !SERVER_REGEX.matches(server) -> "Invalid server"
+            port == null || port !in 1..65535 -> "Port must be between 1 and 65535"
+            !UUID_REGEX.matches(uuid) -> "Invalid VLESS UUID"
+            !KEY_REGEX.matches(publicKey) -> "Invalid Reality public key"
+            !HOST_REGEX.matches(sni) -> "Invalid SNI"
+            !HEX_REGEX.matches(shortId) -> "shortId must be hex"
+            !path.startsWith("/") -> "XHTTP path must start with /"
+            !PATH_REGEX.matches(path) -> "Invalid XHTTP path"
+            else -> null
+        }
+    }
+
     private fun syncTunnelUi(msg: String = SshTunnelService.lastStatus) {
-        val connected  = msg.startsWith("Connected")
-        val active     = SshTunnelService.isActive  // thread alive incl. errors/backoff
+        val connected = msg.startsWith("Connected") || msg.startsWith("Running")
+        val active = SshTunnelService.isActive
         btnStart.isEnabled = !active
-        btnStop.isEnabled  = true  // always a reliable kill switch
-        // colour: green when connected, red on error, grey otherwise
+        btnStop.isEnabled = active
         statusView.setTextColor(when {
-            connected                     -> 0xFF44AA44.toInt()
-            active && !connected &&
-              (msg.contains("Error") || msg.contains("failed") ||
-               msg.contains("refused") || msg.contains("timeout") ||
-               msg.contains("timed out") || msg.contains("lost") ||
-               msg.contains("resolve") || msg.contains("unreachable")) -> 0xFFCC4444.toInt()
-            else                          -> 0xFFAAAAAA.toInt()
+            connected -> 0xFF44AA44.toInt()
+            active && !connected && ERROR_WORDS.any { msg.contains(it, ignoreCase = true) } -> 0xFFCC4444.toInt()
+            else -> 0xFFAAAAAA.toInt()
         })
     }
 
@@ -250,125 +335,89 @@ class MainActivity : AppCompatActivity() {
         networkStatusView.text = status
         if (status.isNotEmpty()) {
             networkStatusView.setTextColor(
-                if (status.contains("⛔")) 0xFFCC4444.toInt() else 0xFF44AA44.toInt()
+                if (NETWORK_WARNING_WORDS.any { status.contains(it, ignoreCase = true) }) {
+                    0xFFCC4444.toInt()
+                } else {
+                    0xFF44AA44.toInt()
+                }
             )
         }
     }
 
-    private fun loadPublicKey() {
-        val pub = File(filesDir, "id_ed25519.pub")
-        if (pub.exists()) {
-            publicKeyView.text = pub.readText().trim()
-            publicKeyView.visibility = View.VISIBLE
-            generatingLayout.visibility = View.GONE
-            btnCopyKey.isEnabled = true
-            btnRegenKey.visibility = View.VISIBLE
-            val last = SshTunnelService.lastStatus
-            if (last.isNotEmpty()) statusView.text = last
-            syncTunnelUi(last)
+    private fun restoreRuntimeUi(
+        savedInstanceState: Bundle? = null,
+        preserveCurrentStatus: Boolean = false
+    ) {
+        val serviceStatus = SshTunnelService.lastStatus
+        val restoredStatus = savedInstanceState?.getString(KEY_STATUS_TEXT).orEmpty()
+        val currentStatus = statusView.text.toString()
+        val status = when {
+            serviceStatus.isNotEmpty() -> serviceStatus
+            restoredStatus.isNotEmpty() -> restoredStatus
+            preserveCurrentStatus && currentStatus.isNotEmpty() -> currentStatus
+            else -> "Stopped"
+        }
+
+        statusView.text = status
+        if (savedInstanceState != null) {
+            settingsPanel.visibility = if (savedInstanceState.getBoolean(KEY_SETTINGS_VISIBLE)) {
+                View.VISIBLE
+            } else {
+                View.GONE
+            }
+            logsPanel.visibility = if (savedInstanceState.getBoolean(KEY_LOGS_VISIBLE)) {
+                View.VISIBLE
+            } else {
+                View.GONE
+            }
+        }
+        updateNetworkStatusView()
+        updateLogs(SshTunnelService.lastLogs)
+        syncTunnelUi(status)
+    }
+
+    private fun updateLogs(logs: String) {
+        logsText.text = logs
+        if (logsPanel.visibility == View.VISIBLE) {
+            logsPanel.post { logsPanel.fullScroll(View.FOCUS_DOWN) }
         }
     }
 
-    private fun forceRegenerateKey() {
-        btnRegenKey.visibility = View.GONE
-        btnCopyKey.isEnabled = false
-        publicKeyView.visibility = View.GONE
-        generatingLayout.visibility = View.VISIBLE
-
-        File(filesDir, "id_ed25519").delete()
-        File(filesDir, "id_ed25519.pub").delete()
-        generateKeyIfNeeded()
+    private fun togglePanel(panel: View, button: Button, title: String) {
+        val expanded = panel.visibility == View.VISIBLE
+        panel.visibility = if (expanded) View.GONE else View.VISIBLE
+        button.text = title
     }
 
-    private fun generateKeyIfNeeded() {
-        Thread {
-            val keyFile = File(filesDir, "id_ed25519")
-            val pubFile = File(filesDir, "id_ed25519.pub")
+    private companion object {
+        const val DEFAULT_CONFIG_VERSION = 2
+        const val DEFAULT_SERVER = "2.26.65.57"
+        const val DEFAULT_PORT = 443
+        const val DEFAULT_UUID = "9629c78b-4e77-444c-9747-d4e44488c811"
+        const val DEFAULT_PUBLIC_KEY = "MHECfwi2j5Ihm7_KmgoVWxbVYKtYBzI6HIh2UFlk6jA"
+        const val DEFAULT_SNI = "github.com"
+        const val DEFAULT_SHORT_ID = "0123456789abcdef"
+        const val DEFAULT_XHTTP_PATH = "/tunnel-light-xhttp"
 
-            val isValid = keyFile.exists() && pubFile.exists() &&
-                keyFile.readText().trimStart().startsWith("-----BEGIN OPENSSH PRIVATE KEY-----")
+        const val PREF_CONFIG_VERSION = "config_version"
+        const val PREF_SERVER = "server"
+        const val PREF_PORT = "port"
+        const val PREF_UUID = "uuid"
+        const val PREF_PUBLIC_KEY = "public_key"
+        const val PREF_SNI = "sni"
+        const val PREF_SHORT_ID = "short_id"
+        const val PREF_XHTTP_PATH = "xhttp_path"
+        const val KEY_STATUS_TEXT = "status_text"
+        const val KEY_SETTINGS_VISIBLE = "settings_visible"
+        const val KEY_LOGS_VISIBLE = "logs_visible"
 
-            if (!isValid) {
-                runCatching {
-                    generateEd25519KeyPair(keyFile, pubFile, "ssh-tunnel@android")
-                }.onFailure { it.printStackTrace() }
-            }
-            runOnUiThread { loadPublicKey() }
-        }.start()
+        val UUID_REGEX = Regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+        val SERVER_REGEX = Regex("^[A-Za-z0-9.:-]+$")
+        val KEY_REGEX = Regex("^[A-Za-z0-9_-]+$")
+        val HOST_REGEX = Regex("^[A-Za-z0-9.-]+$")
+        val HEX_REGEX = Regex("^[A-Fa-f0-9]+$")
+        val PATH_REGEX = Regex("^/[A-Za-z0-9._~/-]*$")
+        val ERROR_WORDS = listOf("error", "failed", "refused", "timeout", "lost", "unreachable", "invalid")
+        val NETWORK_WARNING_WORDS = listOf("weak", "lost", "suspended", "no internet")
     }
-
-    // --- ED25519 key generation using BouncyCastle directly ---
-
-    private fun generateEd25519KeyPair(privateFile: File, publicFile: File, comment: String) {
-        val gen = Ed25519KeyPairGenerator()
-        gen.init(Ed25519KeyGenerationParameters(SecureRandom()))
-        val kp = gen.generateKeyPair()
-        val priv = kp.private as Ed25519PrivateKeyParameters
-        val pub = kp.public as Ed25519PublicKeyParameters
-
-        val seed = priv.encoded    // 32-byte seed
-        val pubBytes = pub.encoded // 32-byte public key point
-
-        writeOpenSshPrivateKey(privateFile, seed, pubBytes, comment)
-        writeOpenSshPublicKey(publicFile, pubBytes, comment)
-    }
-
-    private fun writeOpenSshPrivateKey(file: File, seed: ByteArray, pubBytes: ByteArray, comment: String) {
-        val keyType = "ssh-ed25519".toByteArray()
-        val commentBytes = comment.toByteArray()
-        val privFull = seed + pubBytes  // OpenSSH stores seed||pubkey (64 bytes) as the private key
-
-        val pubKeyBlob = ByteArrayOutputStream().apply {
-            writeU32Bytes(keyType)
-            writeU32Bytes(pubBytes)
-        }.toByteArray()
-
-        val checkInt = SecureRandom().nextInt()
-        val privateBlob = ByteArrayOutputStream().apply {
-            writeU32(checkInt)
-            writeU32(checkInt)
-            writeU32Bytes(keyType)
-            writeU32Bytes(pubBytes)
-            writeU32Bytes(privFull)
-            writeU32Bytes(commentBytes)
-            var pad = 1; while (size() % 8 != 0) write(pad++)
-        }.toByteArray()
-
-        val keyData = ByteArrayOutputStream().apply {
-            write("openssh-key-v1 ".toByteArray())
-            writeU32Bytes("none".toByteArray()) // cipher
-            writeU32Bytes("none".toByteArray()) // kdf
-            writeU32(0)                          // no kdf options
-            writeU32(1)                          // 1 key
-            writeU32Bytes(pubKeyBlob)
-            writeU32Bytes(privateBlob)
-        }.toByteArray()
-
-        val b64 = Base64.getEncoder().encodeToString(keyData)
-        file.writeText(buildString {
-            append("-----BEGIN OPENSSH PRIVATE KEY-----\n")
-            b64.chunked(70).forEach { append(it).append('\n') }
-            append("-----END OPENSSH PRIVATE KEY-----\n")
-        })
-    }
-
-    private fun writeOpenSshPublicKey(file: File, pubBytes: ByteArray, comment: String) {
-        val keyType = "ssh-ed25519".toByteArray()
-        val blob = ByteArrayOutputStream().apply {
-            writeU32Bytes(keyType)
-            writeU32Bytes(pubBytes)
-        }.toByteArray()
-        file.writeText("ssh-ed25519 ${Base64.getEncoder().encodeToString(blob)} $comment\n")
-    }
-
-    private fun ByteArrayOutputStream.writeU32(v: Int) {
-        write(v ushr 24 and 0xFF); write(v ushr 16 and 0xFF)
-        write(v ushr 8 and 0xFF); write(v and 0xFF)
-    }
-
-    private fun ByteArrayOutputStream.writeU32Bytes(b: ByteArray) {
-        writeU32(b.size); write(b)
-    }
-
-    // --- end key generation ---
 }

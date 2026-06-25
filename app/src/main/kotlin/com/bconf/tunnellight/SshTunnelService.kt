@@ -1,323 +1,318 @@
 package com.bconf.tunnellight
 
-import android.app.*
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
-import android.net.wifi.WifiManager
+import android.text.format.DateFormat
+import android.util.Log
 import androidx.core.app.ServiceCompat
-import com.jcraft.jsch.ChannelDirectTCPIP
-import com.jcraft.jsch.JSch
-import com.jcraft.jsch.JSchException
-import com.jcraft.jsch.Proxy
-import com.jcraft.jsch.Session
-import com.jcraft.jsch.SocketFactory as JSchSocketFactory
-import java.io.DataInputStream
-import java.io.File
-import java.io.InputStream
-import java.io.OutputStream
-import java.util.concurrent.Executors
-import java.net.InetAddress
-import java.net.ServerSocket
-import java.net.Socket
-import java.net.SocketTimeoutException
-import java.net.UnknownHostException
-import java.util.concurrent.atomic.AtomicBoolean
+import libv2ray.CoreCallbackHandler
+import libv2ray.CoreController
+import libv2ray.Libv2ray
+import kotlin.math.min
 
 class SshTunnelService : Service() {
 
     companion object {
         const val ACTION_STATUS = "com.bconf.tunnellight.STATUS"
         const val EXTRA_STATUS = "status"
-        @Volatile var isRunning = false  // true only while SOCKS5 proxy is up
-        @Volatile var isActive = false   // true while connection thread is alive (incl. errors/backoff)
+        const val EXTRA_LOGS = "logs"
+
+        const val EXTRA_SERVER_ADDRESS = "server_address"
+        const val EXTRA_SERVER_PORT = "server_port"
+        const val EXTRA_UUID = "uuid"
+        const val EXTRA_PUBLIC_KEY = "public_key"
+        const val EXTRA_SNI = "sni"
+        const val EXTRA_SHORT_ID = "short_id"
+        const val EXTRA_XHTTP_PATH = "xhttp_path"
+
+        @Volatile var isRunning = false
+        @Volatile var isActive = false
         @Volatile var lastStatus = ""
         @Volatile var lastNetworkStatus = ""
+        @Volatile var lastLogs = ""
+
+        private const val CHANNEL_ID = "xray"
+        private const val LOCAL_SOCKS_PORT = 1080
+        private const val MAX_RECONNECT_DELAY_MS = 30_000L
+        private const val MAX_LOG_LINES = 250
+        private val logLines = ArrayDeque<String>()
     }
 
     @Volatile private var shouldRun = false
+    @Volatile private var controller: CoreController? = null
+    private var workerThread: Thread? = null
 
-    // ── Network state ────────────────────────────────────────────────
-    // wifiNetwork and cellNetwork are the currently active Network objects
-    // for each transport type. preferredNetwork() returns wifi > cell.
     @Volatile private var wifiNetwork: Network? = null
     @Volatile private var cellNetwork: Network? = null
     @Volatile private var networkAvailable = false
-
-    private fun preferredNetwork(): Network? = wifiNetwork ?: cellNetwork
-
-    private var session: Session? = null
-    private var proxyServer: Socks5ProxyServer? = null
-    private var connectionThread: Thread? = null
+    @Volatile private var networkGoodEnough = false
 
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
 
-    @Volatile private var backoffSec = 1
-    @Volatile private var consecutiveFailures = 0
-    @Volatile private var jumpSession: Session? = null
-
-    // ── Network callbacks ────────────────────────────────────────────
-    // One callback per transport type so Android does the classification
-    // for us. onAvailable fires with type already guaranteed — no need to
-    // call getNetworkCapabilities() here (it returns null before
-    // onCapabilitiesChanged fires anyway, which was the stuck-on-
-    // "No internet" bug when using a single unfiltered callback).
-
     private val wifiCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
-            val hadNetwork = networkAvailable
-            val hadWifi = wifiNetwork != null
             wifiNetwork = network
-            networkAvailable = true
-            consecutiveFailures = 0
-            updateNetworkStatus()
-            if (shouldRun) {
-                when {
-                    !hadNetwork -> {
-                        sendStatus("Network available — reconnecting…")
-                        connectionThread?.interrupt()
-                    }
-                    !hadWifi -> {
-                        // Cellular was active; switch to the preferred WiFi
-                        sendStatus("WiFi available — switching from cellular…")
-                        connectionThread?.interrupt()
-                    }
-                }
-            }
+            onNetworkChanged()
         }
 
         override fun onLost(network: Network) {
             if (network == wifiNetwork) wifiNetwork = null
-            networkAvailable = preferredNetwork() != null
-            updateNetworkStatus()
-            if (shouldRun) {
-                if (!networkAvailable) {
-                    isRunning = false
-                    sendStatus("Network lost — waiting…")
-                    updateNotification("Waiting for network…")
-                    connectionThread?.interrupt()
-                } else {
-                    // Cellular still up — reconnect through it
-                    sendStatus("WiFi lost — switching to cellular…")
-                    connectionThread?.interrupt()
-                }
-            }
+            onNetworkChanged()
+        }
+
+        override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
+            if (network == wifiNetwork) onNetworkChanged()
         }
     }
 
     private val cellCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
-            val hadNetwork = networkAvailable
             cellNetwork = network
-            networkAvailable = true
-            consecutiveFailures = 0
-            updateNetworkStatus()
-            // Wake the thread only when coming up from no-network; if WiFi
-            // is already active we don't switch to cellular.
-            if (shouldRun && !hadNetwork) {
-                sendStatus("Network available — reconnecting…")
-                connectionThread?.interrupt()
-            }
+            onNetworkChanged()
         }
 
         override fun onLost(network: Network) {
             if (network == cellNetwork) cellNetwork = null
-            networkAvailable = preferredNetwork() != null
-            updateNetworkStatus()
-            // Only interrupt when there's no WiFi fallback
-            if (shouldRun && !networkAvailable) {
-                isRunning = false
-                sendStatus("Network lost — waiting…")
-                updateNotification("Waiting for network…")
-                connectionThread?.interrupt()
-            }
-            // WiFi still active: session keeps running, nothing to do
+            onNetworkChanged()
         }
 
         override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
-            // Refresh cell generation label (4G/5G/…) when it becomes known
-            if (network == cellNetwork) updateNetworkStatus()
+            if (network == cellNetwork) onNetworkChanged()
         }
     }
-
-    // ── Lifecycle ────────────────────────────────────────────────────
 
     override fun onCreate() {
         super.onCreate()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val ch = NotificationChannel(
-                "ssh", "SSH Tunnel", NotificationManager.IMPORTANCE_LOW
+            val channel = NotificationChannel(
+                CHANNEL_ID,
+                "Tunnel Light",
+                NotificationManager.IMPORTANCE_LOW
             )
-            getSystemService(NotificationManager::class.java).createNotificationChannel(ch)
+            getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val host = intent?.getStringExtra("host") ?: run { stopSelf(); return START_NOT_STICKY }
-        val user = intent.getStringExtra("user") ?: run { stopSelf(); return START_NOT_STICKY }
-        val port = intent.getIntExtra("port", 22)
-        val jumpUser = intent.getStringExtra("jump_user")
-        val jumpHost = intent.getStringExtra("jump_host")
-        val jumpPort = intent.getIntExtra("jump_port", 22)
-
-        val label = if (jumpUser != null && jumpHost != null) "$jumpUser@$jumpHost → $user@$host" else "$user@$host"
-
         if (shouldRun) return START_REDELIVER_INTENT
 
-        shouldRun = true
-        isRunning = false
-        isActive = true   // set before any sendStatus so Stop is enabled immediately
-        backoffSec = 1
-        consecutiveFailures = 0
-        initNetworkState()
-
-        acquireLocks()
-        registerNetworkCallback()
-
-        updateNotification("Connecting to $label\u2026")
-        sendStatus("Connecting to $label\u2026")
-
-        connectionThread = Thread {
-            val keyFile = File(filesDir, "id_ed25519")
-
-            while (shouldRun) {
-                // Guard: no network → wait until it comes back
-                if (!networkAvailable && shouldRun) {
-                    updateNotification("Waiting for network\u2026")
-                    sendStatus("Network unavailable \u2014 waiting\u2026")
-                    waitForNetwork()
-                    if (!shouldRun) break
-                }
-
-                // Capture the preferred network at the moment we begin connecting
-                // so the socket is bound to that specific interface.
-                val connectVia = preferredNetwork()
-
-                var sess: Session? = null
-                var jumpSess: Session? = null
-                var proxy: Socks5ProxyServer? = null
-                try {
-                    val jsch = JSch()
-                    jsch.addIdentity(keyFile.absolutePath)
-
-                    // Connect jump host first if chaining.
-                    // Assign jumpSess BEFORE connect() so the finally block can
-                    // always disconnect it even if connect() throws mid-handshake.
-                    if (jumpUser != null && jumpHost != null) {
-                        sendStatus("Connecting to jump $jumpUser@$jumpHost\u2026")
-                        updateNotification("Connecting to jump $jumpUser@$jumpHost\u2026")
-                        val js = jsch.getSession(jumpUser, jumpHost, jumpPort)
-                        js.setConfig("StrictHostKeyChecking", "no")
-                        js.setConfig("TCPKeepAlive", "yes")
-                        js.setConfig("ServerAliveInterval", "10")
-                        js.setConfig("ServerAliveCountMax", "2")
-                        if (connectVia != null) js.setSocketFactory(NetworkBoundSocketFactory(connectVia))
-                        jumpSess = js
-                        jumpSession = js
-                        js.connect(15_000)
-                        sendStatus("Jump connected \u2014 connecting to $user@$host\u2026")
-                        updateNotification("Jump connected \u2014 connecting to $user@$host\u2026")
-                    } else {
-                        sendStatus("Connecting to $user@$host\u2026")
-                        updateNotification("Connecting to $user@$host\u2026")
-                    }
-
-                    // Connect target (via jump proxy if chaining, else direct).
-                    // Assign sess BEFORE connect() for the same reason.
-                    val s = jsch.getSession(user, host, port)
-                    s.setConfig("StrictHostKeyChecking", "no")
-                    s.setConfig("TCPKeepAlive", "yes")
-                    s.setConfig("ServerAliveInterval", "10")
-                    s.setConfig("ServerAliveCountMax", "2")
-                    if (jumpSess != null) s.setProxy(JumpProxy(jumpSess))
-                    else if (connectVia != null) s.setSocketFactory(NetworkBoundSocketFactory(connectVia))
-                    sess = s
-                    s.connect(15_000)
-
-                    session = sess
-                    proxy = Socks5ProxyServer(sess)
-                    proxyServer = proxy
-                    proxy.start()
-
-                    isRunning = true
-                    consecutiveFailures = 0
-                    backoffSec = 1
-                    updateNotification("Connected \u2014 SOCKS5 on 127.0.0.1:1080")
-                    sendStatus("Connected \u2014 SOCKS5 on 127.0.0.1:1080")
-
-                    // Block until the session drops or we're asked to stop
-                    while (shouldRun && sess.isConnected()) {
-                        Thread.sleep(3_000)
-                    }
-
-                    // Session died but shouldRun still true — reconnect
-                    if (shouldRun) {
-                        isRunning = false
-                        sendStatus("Connection lost \u2014 reconnecting\u2026")
-                        updateNotification("Reconnecting\u2026")
-                    }
-                } catch (_: InterruptedException) {
-                    // Woken by stop(), network callback, or backoff interrupt
-                } catch (e: JSchException) {
-                    consecutiveFailures++
-                    if (SshTunnelLogic.isFatalSshError(e.message)) {
-                        shouldRun = false
-                    }
-                    if (shouldRun) {
-                        val msg = SshTunnelLogic.describeError(e.message, host, consecutiveFailures)
-                        sendStatus(msg); updateNotification(msg)
-                    }
-                } catch (e: UnknownHostException) {
-                    consecutiveFailures++
-                    if (shouldRun) {
-                        val msg = SshTunnelLogic.describeError(e.message, host, consecutiveFailures)
-                        sendStatus(msg); updateNotification(msg)
-                    }
-                } catch (e: SocketTimeoutException) {
-                    consecutiveFailures++
-                    if (shouldRun) {
-                        val msg = SshTunnelLogic.describeError(e.message, host, consecutiveFailures)
-                        sendStatus(msg); updateNotification(msg)
-                    }
-                } catch (e: Exception) {
-                    consecutiveFailures++
-                    if (shouldRun) {
-                        val msg = SshTunnelLogic.describeError(e.message, host, consecutiveFailures)
-                        sendStatus(msg); updateNotification(msg)
-                    }
-                } finally {
-                    isRunning = false
-                    proxy?.stop()
-                    sess?.disconnect()
-                    jumpSess?.disconnect()
-                    jumpSession = null
-                    session = null
-                    proxyServer = null
-                }
-
-                // Backoff sleep before next reconnect attempt
-                if (shouldRun && networkAvailable) {
-                    val result = SshTunnelLogic.backoff(backoffSec)
-                    backoffSec = result.nextBackoffSec
-                    try { Thread.sleep(result.delayMs) } catch (_: InterruptedException) { }
-                }
-            }
-
-            isActive = false
+        val config = readConfig(intent) ?: run {
             stopSelf()
+            return START_NOT_STICKY
+        }
+
+        shouldRun = true
+        isActive = true
+        isRunning = false
+        appendLog("Service starting")
+
+        initNetworkState()
+        registerNetworkCallback()
+        acquireLocks()
+
+        sendStatus("Connecting to ${config.server}:${config.port}")
+        updateNotification("Connecting to ${config.server}:${config.port}")
+
+        workerThread = Thread {
+            var reconnectAttempt = 0
+            try {
+                Libv2ray.initCoreEnv(filesDir.absolutePath, "")
+                val version = Libv2ray.checkVersionX()
+                Log.i("XrayService", version)
+                appendLog(version)
+
+                while (shouldRun) {
+                    waitForGoodNetwork()
+                    if (!shouldRun) break
+
+                    sendStatus("Connecting to ${config.server}:${config.port}")
+                    updateNotification("Connecting to ${config.server}:${config.port}")
+
+                    val core = newCoreController()
+                    controller = core
+
+                    try {
+                        core.startLoop(buildXrayConfig(config), 0)
+                        reconnectAttempt = 0
+
+                        while (shouldRun && core.isRunning && networkGoodEnough) {
+                            Thread.sleep(1_000)
+                        }
+                    } catch (_: InterruptedException) {
+                        // Re-check shouldRun/network state below.
+                    } catch (e: Exception) {
+                        Log.e("XrayService", "Xray failed", e)
+                        sendStatus("Error: ${e.message ?: e.javaClass.simpleName}")
+                        updateNotification("Error; reconnecting")
+                    } finally {
+                        stopCore()
+                        isRunning = false
+                    }
+
+                    if (!shouldRun) break
+
+                    if (!networkGoodEnough) {
+                        sendStatus("Network weak; waiting to reconnect")
+                        updateNotification("Waiting for better network")
+                        continue
+                    }
+
+                    reconnectAttempt += 1
+                    val delay = min(1_000L shl min(reconnectAttempt - 1, 5), MAX_RECONNECT_DELAY_MS)
+                    sendStatus("Disconnected; reconnecting in ${delay / 1_000}s")
+                    updateNotification("Reconnecting in ${delay / 1_000}s")
+                    sleepInterruptibly(delay)
+                }
+            } catch (_: InterruptedException) {
+                // Stop or network transition.
+            } catch (e: Exception) {
+                Log.e("XrayService", "Xray failed", e)
+                sendStatus("Error: ${e.message ?: e.javaClass.simpleName}")
+                updateNotification("Error")
+            } finally {
+                stopCore()
+                isRunning = false
+                isActive = false
+                if (!shouldRun && lastStatus.isNotEmpty() && !lastStatus.startsWith("Error")) {
+                    sendStatus("Disconnected")
+                }
+                stopSelf()
+            }
         }.also { it.start() }
 
         return START_REDELIVER_INTENT
     }
 
-    // ── Network state helpers ─────────────────────────────────────────
+    override fun onDestroy() {
+        shouldRun = false
+        appendLog("Service stopping")
+        workerThread?.interrupt()
+        stopCore()
+        isRunning = false
+        isActive = false
+        lastStatus = ""
+        unregisterNetworkCallback()
+        releaseLocks()
+        ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+        super.onDestroy()
+    }
+
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    private fun readConfig(intent: Intent?): XrayConfig? {
+        val server = intent?.getStringExtra(EXTRA_SERVER_ADDRESS)?.trim().orEmpty()
+        val port = intent?.getIntExtra(EXTRA_SERVER_PORT, 443) ?: 443
+        val uuid = intent?.getStringExtra(EXTRA_UUID)?.trim().orEmpty()
+        val publicKey = intent?.getStringExtra(EXTRA_PUBLIC_KEY)?.trim().orEmpty()
+        val sni = intent?.getStringExtra(EXTRA_SNI)?.trim().orEmpty()
+        val shortId = intent?.getStringExtra(EXTRA_SHORT_ID)?.trim().orEmpty()
+        val path = intent?.getStringExtra(EXTRA_XHTTP_PATH)?.trim().orEmpty()
+        if (server.isEmpty() || uuid.isEmpty() || publicKey.isEmpty() || sni.isEmpty() || path.isEmpty()) {
+            sendStatus("Error: missing Xray config")
+            return null
+        }
+        return XrayConfig(server, port, uuid, publicKey, sni, shortId, path)
+    }
+
+    private fun buildXrayConfig(config: XrayConfig): String {
+        return """
+            {
+              "log": { "loglevel": "warning" },
+              "inbounds": [
+                {
+                  "tag": "local-socks",
+                  "listen": "127.0.0.1",
+                  "port": $LOCAL_SOCKS_PORT,
+                  "protocol": "socks",
+                  "settings": {
+                    "auth": "noauth",
+                    "udp": true
+                  }
+                }
+              ],
+              "outbounds": [
+                {
+                  "tag": "proxy",
+                  "protocol": "vless",
+                  "settings": {
+                    "vnext": [
+                      {
+                        "address": "${config.server.json()}",
+                        "port": ${config.port},
+                        "users": [
+                          {
+                            "id": "${config.uuid.json()}",
+                            "encryption": "none"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  "streamSettings": {
+                    "network": "xhttp",
+                    "xhttpSettings": {
+                      "path": "${config.path.json()}",
+                      "mode": "auto"
+                    },
+                    "security": "reality",
+                    "realitySettings": {
+                      "serverName": "${config.sni.json()}",
+                      "publicKey": "${config.publicKey.json()}",
+                      "fingerprint": "chrome",
+                      "shortId": "${config.shortId.json()}"
+                    }
+                  }
+                }
+              ]
+            }
+        """.trimIndent()
+    }
+
+    private fun stopCore() {
+        val core = controller ?: return
+        controller = null
+        runCatching { core.stopLoop() }
+            .onFailure { Log.e("XrayService", "Error stopping Xray", it) }
+    }
+
+    private fun newCoreController(): CoreController {
+        return Libv2ray.newCoreController(object : CoreCallbackHandler {
+            override fun startup(): Long {
+                isRunning = true
+                sendStatus("Running (SOCKS5 127.0.0.1:$LOCAL_SOCKS_PORT)")
+                updateNotification("SOCKS5 on 127.0.0.1:$LOCAL_SOCKS_PORT")
+                return 0
+            }
+
+            override fun shutdown(): Long {
+                isRunning = false
+                sendStatus("Disconnected")
+                return 0
+            }
+
+            override fun onEmitStatus(code: Long, message: String): Long {
+                Log.i("XrayService", "core status $code $message")
+                appendLog("Core status $code: $message")
+                return 0
+            }
+        })
+    }
+
+    private fun preferredNetwork(): Network? = wifiNetwork ?: cellNetwork
 
     private fun initNetworkState() {
         runCatching {
@@ -334,31 +329,107 @@ class SshTunnelService : Service() {
         updateNetworkStatus()
     }
 
-    private fun waitForNetwork() {
-        while (shouldRun && !networkAvailable) {
-            try { Thread.sleep(1_000) } catch (_: InterruptedException) { /* re-check condition */ }
+    private fun waitForGoodNetwork() {
+        while (shouldRun) {
+            updateNetworkStatus()
+            if (networkGoodEnough) return
+
+            val status = if (networkAvailable) {
+                "Network weak: $lastNetworkStatus"
+            } else {
+                "Network unavailable; waiting"
+            }
+            sendStatus(status)
+            updateNotification("Waiting for network")
+            sleepInterruptibly(1_000)
+        }
+    }
+
+    private fun onNetworkChanged() {
+        val previousStatus = lastNetworkStatus
+        updateNetworkStatus()
+        if (!shouldRun) return
+
+        if (previousStatus != lastNetworkStatus) {
+            appendLog("Network changed: $lastNetworkStatus")
+        }
+        sendStatus(lastNetworkStatus)
+
+        if (!networkGoodEnough) {
+            updateNotification("Waiting for better network")
+            stopCore()
+        } else if (!isRunning) {
+            updateNotification("Network ready; reconnecting")
         }
     }
 
     private fun updateNetworkStatus() {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         val wifi = wifiNetwork
         val cell = cellNetwork
+
+        val wifiQuality = wifi?.let { networkQuality(cm, it, "WiFi") }
+        val cellQuality = cell?.let { networkQuality(cm, it, "Cell") }
+        val bestQuality = listOfNotNull(wifiQuality, cellQuality).maxByOrNull { it.score }
+
+        networkAvailable = bestQuality != null
+        networkGoodEnough = bestQuality?.goodEnough == true
         lastNetworkStatus = when {
-            wifi != null && cell != null ->
-                "📶 WiFi • 📡 Cell${getCellGeneration(cell)}"
-            wifi != null -> "📶 WiFi"
-            cell != null -> "📡 Cell${getCellGeneration(cell)}"
-            else -> "⛔ No internet"
+            wifiQuality != null && cellQuality != null ->
+                "${wifiQuality.label} ${wifiQuality.summary}; ${cellQuality.label} ${cellQuality.summary}"
+            wifiQuality != null -> "${wifiQuality.label} ${wifiQuality.summary}"
+            cellQuality != null -> "${cellQuality.label} ${cellQuality.summary}"
+            else -> "No internet"
         }
     }
 
-    private fun getCellGeneration(network: Network): String = runCatching {
-        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-        val caps = cm.getNetworkCapabilities(network) ?: return@runCatching ""
-        SshTunnelLogic.getCellularGenerationName(caps.linkDownstreamBandwidthKbps)
-    }.getOrDefault("")
+    private fun networkQuality(
+        cm: ConnectivityManager,
+        network: Network,
+        label: String
+    ): NetworkQuality {
+        val caps = cm.getNetworkCapabilities(network)
+            ?: return NetworkQuality(label, false, 0, "lost")
 
-    // ── Network callback registration ─────────────────────────────────
+        val hasInternet = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+        val validated = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+        val notSuspended = Build.VERSION.SDK_INT < Build.VERSION_CODES.P ||
+            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_SUSPENDED)
+        val downKbps = caps.linkDownstreamBandwidthKbps
+        val upKbps = caps.linkUpstreamBandwidthKbps
+        val isCell = caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)
+        val verySlowCell = isCell && downKbps in 1 until 64
+        val goodEnough = hasInternet && notSuspended && !verySlowCell
+        val score = listOf(
+            if (hasInternet) 10 else 0,
+            if (validated) 10 else 0,
+            if (notSuspended) 5 else 0,
+            min(downKbps / 512, 10),
+            min(upKbps / 128, 5)
+        ).sum()
+        val flags = mutableListOf<String>()
+        if (validated) flags += "validated" else flags += "unvalidated"
+        if (!hasInternet) flags += "no internet"
+        if (!notSuspended) flags += "suspended"
+        if (verySlowCell) flags += "slow"
+        if (downKbps > 0 || upKbps > 0) flags += "${downKbps}/${upKbps}kbps"
+
+        return NetworkQuality(
+            label = label,
+            goodEnough = goodEnough,
+            score = score,
+            summary = if (goodEnough) "ok (${flags.joinToString(", ")})" else "weak (${flags.joinToString(", ")})"
+        )
+    }
+
+    private fun sleepInterruptibly(delayMs: Long) {
+        val endAt = System.currentTimeMillis() + delayMs
+        while (shouldRun) {
+            val remaining = endAt - System.currentTimeMillis()
+            if (remaining <= 0) return
+            Thread.sleep(min(remaining, 1_000L))
+        }
+    }
 
     private fun registerNetworkCallback() {
         runCatching {
@@ -384,17 +455,17 @@ class SshTunnelService : Service() {
         runCatching { cm.unregisterNetworkCallback(cellCallback) }
     }
 
-    // ── Locks ─────────────────────────────────────────────────────────
-
     private fun acquireLocks() {
         wakeLock = getSystemService(PowerManager::class.java)
-            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "TunnelLight::SSH")
+            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "TunnelLight::Xray")
             .also { it.acquire() }
 
-        val wifiLockMode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+        val wifiLockMode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             WifiManager.WIFI_MODE_FULL_LOW_LATENCY
-        else
-            @Suppress("DEPRECATION") WifiManager.WIFI_MODE_FULL_HIGH_PERF
+        } else {
+            @Suppress("DEPRECATION")
+            WifiManager.WIFI_MODE_FULL_HIGH_PERF
+        }
         wifiLock = applicationContext.getSystemService(WifiManager::class.java)
             .createWifiLock(wifiLockMode, "TunnelLight::WiFi")
             .also { it.acquire() }
@@ -407,11 +478,26 @@ class SshTunnelService : Service() {
         }
     }
 
-    // ── Broadcast & Notification ───────────────────────────────────────
-
     private fun sendStatus(message: String) {
+        val changed = message != lastStatus
         lastStatus = message
-        sendBroadcast(Intent(ACTION_STATUS).putExtra(EXTRA_STATUS, message))
+        if (changed) appendLog(message)
+        sendBroadcast(
+            Intent(ACTION_STATUS)
+                .putExtra(EXTRA_STATUS, message)
+                .putExtra(EXTRA_LOGS, lastLogs)
+        )
+    }
+
+    private fun appendLog(message: String) {
+        val time = DateFormat.format("HH:mm:ss", System.currentTimeMillis()).toString()
+        synchronized(logLines) {
+            logLines.addLast("$time  $message")
+            while (logLines.size > MAX_LOG_LINES) {
+                logLines.removeFirst()
+            }
+            lastLogs = logLines.joinToString("\n")
+        }
     }
 
     private fun updateNotification(message: String) {
@@ -419,11 +505,13 @@ class SshTunnelService : Service() {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
         val pendingIntent = PendingIntent.getActivity(
-            this, 0, tapIntent,
+            this,
+            0,
+            tapIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-        val notification = Notification.Builder(this, "ssh")
-            .setContentTitle("SSH Tunnel")
+        val notification: Notification = Notification.Builder(this, CHANNEL_ID)
+            .setContentTitle("Tunnel Light")
             .setContentText(message)
             .setSmallIcon(R.drawable.ic_tunnel_notification)
             .setContentIntent(pendingIntent)
@@ -432,193 +520,33 @@ class SshTunnelService : Service() {
         startForeground(1, notification)
     }
 
-    // ── Standard overrides ─────────────────────────────────────────────
-
-    override fun onBind(intent: Intent?): IBinder? = null
-
-    override fun onDestroy() {
-        shouldRun = false
-        isRunning = false
-        isActive = false
-        lastStatus = ""
-        connectionThread?.interrupt()
-        proxyServer?.stop()
-        session?.disconnect()
-        jumpSession?.disconnect()
-        unregisterNetworkCallback()
-        releaseLocks()
-        ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
-        super.onDestroy()
-    }
-}
-
-// ── Socket factory bound to a specific Android Network ────────────────
-// JSch uses this to open its TCP connection through the chosen interface
-// (WiFi or cellular) rather than letting the OS pick arbitrarily.
-
-private class NetworkBoundSocketFactory(
-    private val network: Network
-) : JSchSocketFactory {
-    override fun createSocket(host: String, port: Int): Socket =
-        network.socketFactory.createSocket(host, port)
-    override fun getInputStream(socket: Socket): InputStream = socket.inputStream
-    override fun getOutputStream(socket: Socket): OutputStream = socket.outputStream
-}
-
-// ── Jump proxy (SSH through another SSH host) ────────────────────────
-
-/**
- * A JSch Proxy implementation that tunnels TCP connections through an existing SSH session.
- * Used for jump-host chaining: client → jump → target.
- */
-internal class JumpProxy(private val session: Session) : Proxy {
-
-    private var channel: ChannelDirectTCPIP? = null
-    private var inputStream: InputStream? = null
-    private var outputStream: OutputStream? = null
-
-    override fun connect(socketFactory: JSchSocketFactory?, host: String, port: Int, timeout: Int) {
-        val ch = session.openChannel("direct-tcpip") as ChannelDirectTCPIP
-        ch.setHost(host)
-        ch.setPort(port)
-        ch.setOrgIPAddress("127.0.0.1")
-        ch.setOrgPort(1)  // RFC 4254 §7.2: originator port must be non-zero
-        // Retrieve streams BEFORE connect() so the internal pipe is wired up
-        // before the target's SSH banner arrives; data arriving while the pipe
-        // is null is silently dropped by JSch.
-        inputStream = ch.inputStream
-        outputStream = ch.outputStream
-        ch.connect(timeout)
-        channel = ch
-    }
-
-    override fun getInputStream() = inputStream
-    override fun getOutputStream() = outputStream
-    override fun getSocket() = null
-
-    override fun close() {
-        channel?.disconnect()
-    }
-}
-
-// ── SOCKS5 proxy server (RFC 1928) ────────────────────────────────────
-
-private class Socks5ProxyServer(
-    private val session: Session,
-    private val listenPort: Int = 1080
-) {
-    private var serverSocket: ServerSocket? = null
-    @Volatile private var running = false
-    private val executor = Executors.newFixedThreadPool(20)
-
-    fun start() {
-        running = true
-        val ss = ServerSocket(listenPort, 50, InetAddress.getByName("127.0.0.1"))
-        serverSocket = ss
-        Thread {
-            while (running) {
-                try {
-                    val client = ss.accept()
-                    executor.execute { handleClient(client) }
-                } catch (e: Exception) {
-                    if (running) e.printStackTrace()
-                }
+    private fun String.json(): String = buildString {
+        for (ch in this@json) {
+            when (ch) {
+                '\\' -> append("\\\\")
+                '"' -> append("\\\"")
+                '\n' -> append("\\n")
+                '\r' -> append("\\r")
+                '\t' -> append("\\t")
+                else -> append(ch)
             }
-        }.start()
-    }
-
-    fun stop() {
-        running = false
-        executor.shutdownNow()
-        runCatching { serverSocket?.close() }
-    }
-
-    private fun handleClient(client: Socket) {
-        try {
-            client.soTimeout = 15_000
-            val inp = DataInputStream(client.getInputStream())
-            val out = client.getOutputStream()
-
-            // ── SOCKS5 handshake ──
-            if (inp.read() != 5) { client.close(); return }
-            val nMethods = inp.read()
-            repeat(nMethods) { inp.read() }
-            out.write(byteArrayOf(5, 0)) // no auth
-            out.flush()
-
-            // ── Request ──
-            inp.read() // ver
-            val cmd = inp.read()
-            inp.read() // rsv
-            val atype = inp.read()
-
-            val targetHost = when (atype) {
-                1 -> {
-                    val b = ByteArray(4); inp.readFully(b)
-                    b.joinToString(".") { (it.toInt() and 0xFF).toString() }
-                }
-                3 -> {
-                    val len = inp.read()
-                    val b = ByteArray(len); inp.readFully(b)
-                    String(b)
-                }
-                else -> {
-                    out.write(byteArrayOf(5, 8, 0, 1, 0, 0, 0, 0, 0, 0)); out.flush()
-                    client.close(); return
-                }
-            }
-            val targetPort = (inp.read() shl 8) or inp.read()
-
-            if (cmd != 1) { // only CONNECT is supported
-                out.write(byteArrayOf(5, 7, 0, 1, 0, 0, 0, 0, 0, 0)); out.flush()
-                client.close(); return
-            }
-
-            // ── Open SSH channel ──
-            if (!session.isConnected) {
-                out.write(byteArrayOf(5, 4, 0, 1, 0, 0, 0, 0, 0, 0)); out.flush()
-                client.close(); return
-            }
-            val ch = session.openChannel("direct-tcpip") as ChannelDirectTCPIP
-            ch.setHost(targetHost)
-            ch.setPort(targetPort)
-            ch.setOrgIPAddress("127.0.0.1")
-            ch.setOrgPort(listenPort)
-
-            try {
-                ch.connect(5_000)
-            } catch (e: Exception) {
-                out.write(byteArrayOf(5, 5, 0, 1, 0, 0, 0, 0, 0, 0)); out.flush()
-                client.close(); return
-            }
-
-            out.write(byteArrayOf(5, 0, 0, 1, 0, 0, 0, 0, 0, 0)); out.flush()
-
-            // ── Bidirectional pump ──
-            val chIn = ch.inputStream
-            val chOut = ch.outputStream
-            val stopped = AtomicBoolean(false)
-            val t = Thread { pump(inp, chOut, stopped) }
-            t.start()
-            pump(chIn, out, stopped)
-            stopped.set(true)
-            t.join(1000)
-            ch.disconnect()
-        } catch (_: Exception) {
-        } finally {
-            runCatching { client.close() }
         }
     }
 
-    private fun pump(src: InputStream, dst: OutputStream, stopped: AtomicBoolean) {
-        try {
-            val buf = ByteArray(8192)
-            while (!stopped.get()) {
-                val n = src.read(buf)
-                if (n == -1) break
-                dst.write(buf, 0, n)
-                dst.flush()
-            }
-        } catch (_: Exception) { }
-    }
+    private data class XrayConfig(
+        val server: String,
+        val port: Int,
+        val uuid: String,
+        val publicKey: String,
+        val sni: String,
+        val shortId: String,
+        val path: String
+    )
+
+    private data class NetworkQuality(
+        val label: String,
+        val goodEnough: Boolean,
+        val score: Int,
+        val summary: String
+    )
 }
