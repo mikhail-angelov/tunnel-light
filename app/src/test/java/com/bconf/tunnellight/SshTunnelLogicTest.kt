@@ -117,6 +117,17 @@ class SshTunnelLogicTest {
         assertFalse(SshTunnelLogic.isFatalSshError(null))
     }
 
+    @Test
+    fun `fatal host key changed`() {
+        assertTrue(SshTunnelLogic.isFatalSshError("HostKey has been changed: [example.com]:2222"))
+    }
+
+    @Test
+    fun `describe host key changed names the host`() {
+        val msg = SshTunnelLogic.describeError("HostKey has been changed: [example.com]:2222", "example.com", 1)
+        assertTrue(msg.startsWith("Host key changed for [example.com]:2222"))
+    }
+
     // ── isLikelyTransient ───────────────────────────────────────────
 
     @Test

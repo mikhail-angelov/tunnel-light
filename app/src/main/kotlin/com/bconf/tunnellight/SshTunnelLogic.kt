@@ -89,8 +89,13 @@ object SshTunnelLogic {
         return msg.contains("Auth fail", ignoreCase = true) ||
                 msg.contains("USERAUTH fail", ignoreCase = true) ||
                 msg.contains("invalid privatekey", ignoreCase = true) ||
-                (msg.contains("key", ignoreCase = true) && msg.contains("rejected", ignoreCase = true))
+                (msg.contains("key", ignoreCase = true) && msg.contains("rejected", ignoreCase = true)) ||
+                isHostKeyChanged(msg)
     }
+
+    /** Returns true if JSch refused the connection because the server's host key differs from known_hosts. */
+    fun isHostKeyChanged(message: String?): Boolean =
+        message?.contains("HostKey has been changed", ignoreCase = true) == true
 
     /** Returns true if the error is likely caused by network flakiness and retrying makes sense. */
     fun isLikelyTransient(message: String?): Boolean {
@@ -112,6 +117,8 @@ object SshTunnelLogic {
     fun describeError(message: String?, host: String, attempts: Int): String {
         val msg = message ?: "Unknown error"
         return when {
+            isHostKeyChanged(msg) ->
+                "Host key changed for ${msg.substringAfter(": ")} — accept it only if the server was replaced"
             msg.contains("Auth fail", ignoreCase = true) ||
             msg.contains("USERAUTH fail", ignoreCase = true) ->
                 "Authentication failed \u2014 check username and public key on server"

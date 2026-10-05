@@ -21,6 +21,7 @@ import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import com.jcraft.jsch.JSch
 import org.bouncycastle.crypto.generators.Ed25519KeyPairGenerator
 import org.bouncycastle.crypto.params.Ed25519KeyGenerationParameters
 import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters
@@ -45,6 +46,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnStop: Button
     private lateinit var btnCopyKey: Button
     private lateinit var btnRegenKey: Button
+    private lateinit var btnAcceptHostKey: Button
 
     private val prefs by lazy { getSharedPreferences("tunnel", MODE_PRIVATE) }
 
@@ -86,6 +88,7 @@ class MainActivity : AppCompatActivity() {
         btnStop = findViewById(R.id.btnStop)
         btnCopyKey = findViewById(R.id.btnCopyKey)
         btnRegenKey = findViewById(R.id.btnRegenKey)
+        btnAcceptHostKey = findViewById(R.id.btnAcceptHostKey)
 
         btnStart.isEnabled = false
         btnStop.isEnabled = false
@@ -154,6 +157,7 @@ class MainActivity : AppCompatActivity() {
         btnStop.setOnClickListener {
             stopService(Intent(this, SshTunnelService::class.java))
             SshTunnelService.isActive = false
+            SshTunnelService.lastStatus = "Stopped"
             statusView.text = "Stopped"
             statusView.setTextColor(0xFFAAAAAA.toInt())
             syncTunnelUi("Stopped")
@@ -170,6 +174,16 @@ class MainActivity : AppCompatActivity() {
                 .setTitle("Regenerate key?")
                 .setMessage("This will create a new key pair. You will need to add the new public key to ~/.ssh/authorized_keys on your server — the tunnel will stop working until you do.")
                 .setPositiveButton("Regenerate") { _, _ -> forceRegenerateKey() }
+                .setNegativeButton("Cancel", null)
+                .show()
+        }
+
+        btnAcceptHostKey.setOnClickListener {
+            val hostKey = SshTunnelService.changedHostKey ?: return@setOnClickListener
+            AlertDialog.Builder(this)
+                .setTitle("Accept new host key?")
+                .setMessage("The key of ${hostKey.host} has changed. Accept it only if you know the server was replaced or reinstalled — otherwise someone may be intercepting the connection.")
+                .setPositiveButton("Accept") { _, _ -> acceptHostKey() }
                 .setNegativeButton("Cancel", null)
                 .show()
         }
@@ -233,16 +247,29 @@ class MainActivity : AppCompatActivity() {
         val active     = SshTunnelService.isActive  // thread alive incl. errors/backoff
         btnStart.isEnabled = !active
         btnStop.isEnabled  = true  // always a reliable kill switch
+        btnAcceptHostKey.visibility =
+            if (!active && SshTunnelService.changedHostKey != null) View.VISIBLE else View.GONE
         // colour: green when connected, red on error, grey otherwise
         statusView.setTextColor(when {
             connected                     -> 0xFF44AA44.toInt()
-            active && !connected &&
-              (msg.contains("Error") || msg.contains("failed") ||
-               msg.contains("refused") || msg.contains("timeout") ||
-               msg.contains("timed out") || msg.contains("lost") ||
-               msg.contains("resolve") || msg.contains("unreachable")) -> 0xFFCC4444.toInt()
+            msg.contains("Error") || msg.contains("failed") ||
+              msg.contains("refused") || msg.contains("timeout") ||
+              msg.contains("timed out") || msg.contains("lost") ||
+              msg.contains("resolve") || msg.contains("unreachable") ||
+              msg.contains("changed") || msg.contains("Invalid") -> 0xFFCC4444.toInt()
             else                          -> 0xFFAAAAAA.toInt()
         })
+    }
+
+    private fun acceptHostKey() {
+        val hostKey = SshTunnelService.changedHostKey ?: return
+        val repo = JSch().apply {
+            setKnownHosts(File(filesDir, SshTunnelService.KNOWN_HOSTS_FILE).absolutePath)
+        }.hostKeyRepository
+        repo.remove(hostKey.host, null)  // drop every old key of this host
+        repo.add(hostKey, null)
+        SshTunnelService.changedHostKey = null
+        btnStart.performClick()
     }
 
     private fun updateNetworkStatusView() {

@@ -13,6 +13,8 @@ import android.os.PowerManager
 import android.net.wifi.WifiManager
 import androidx.core.app.ServiceCompat
 import com.jcraft.jsch.ChannelDirectTCPIP
+import com.jcraft.jsch.HostKey
+import com.jcraft.jsch.HostKeyRepository
 import com.jcraft.jsch.JSch
 import com.jcraft.jsch.JSchException
 import com.jcraft.jsch.Proxy
@@ -39,6 +41,9 @@ class SshTunnelService : Service() {
         @Volatile var isActive = false   // true while connection thread is alive (incl. errors/backoff)
         @Volatile var lastStatus = ""
         @Volatile var lastNetworkStatus = ""
+        /** New host key presented by a server whose key no longer matches known_hosts; set until accepted. */
+        @Volatile var changedHostKey: HostKey? = null
+        const val KNOWN_HOSTS_FILE = "known_hosts"
     }
 
     @Volatile private var shouldRun = false
@@ -176,6 +181,7 @@ class SshTunnelService : Service() {
         isActive = true   // set before any sendStatus so Stop is enabled immediately
         backoffSec = 1
         consecutiveFailures = 0
+        changedHostKey = null
         initNetworkState()
 
         acquireLocks()
@@ -186,6 +192,8 @@ class SshTunnelService : Service() {
 
         connectionThread = Thread {
             val keyFile = File(filesDir, "id_ed25519")
+            // JSch only persists known_hosts into an existing file
+            val knownHostsFile = File(filesDir, KNOWN_HOSTS_FILE).apply { createNewFile() }
 
             while (shouldRun) {
                 // Guard: no network → wait until it comes back
@@ -203,9 +211,11 @@ class SshTunnelService : Service() {
                 var sess: Session? = null
                 var jumpSess: Session? = null
                 var proxy: Socks5ProxyServer? = null
+                val jsch = JSch()
                 try {
-                    val jsch = JSch()
                     jsch.addIdentity(keyFile.absolutePath)
+                    jsch.setKnownHosts(knownHostsFile.absolutePath)
+                    jsch.hostKeyRepository = TofuHostKeyRepository(jsch.hostKeyRepository)
 
                     // Connect jump host first if chaining.
                     // Assign jumpSess BEFORE connect() so the finally block can
@@ -214,7 +224,7 @@ class SshTunnelService : Service() {
                         sendStatus("Connecting to jump $jumpUser@$jumpHost\u2026")
                         updateNotification("Connecting to jump $jumpUser@$jumpHost\u2026")
                         val js = jsch.getSession(jumpUser, jumpHost, jumpPort)
-                        js.setConfig("StrictHostKeyChecking", "no")
+                        js.setConfig("StrictHostKeyChecking", "yes")
                         js.setConfig("TCPKeepAlive", "yes")
                         js.setConfig("ServerAliveInterval", "10")
                         js.setConfig("ServerAliveCountMax", "2")
@@ -232,7 +242,7 @@ class SshTunnelService : Service() {
                     // Connect target (via jump proxy if chaining, else direct).
                     // Assign sess BEFORE connect() for the same reason.
                     val s = jsch.getSession(user, host, port)
-                    s.setConfig("StrictHostKeyChecking", "no")
+                    s.setConfig("StrictHostKeyChecking", "yes")
                     s.setConfig("TCPKeepAlive", "yes")
                     s.setConfig("ServerAliveInterval", "10")
                     s.setConfig("ServerAliveCountMax", "2")
@@ -267,13 +277,21 @@ class SshTunnelService : Service() {
                     // Woken by stop(), network callback, or backoff interrupt
                 } catch (e: JSchException) {
                     consecutiveFailures++
+                    var msg = SshTunnelLogic.describeError(e.message, host, consecutiveFailures)
+                    if (SshTunnelLogic.isHostKeyChanged(e.message)) {
+                        // sess is assigned only after the jump connected, so a null sess means the jump failed
+                        val hk = (sess ?: jumpSess)?.hostKey
+                        changedHostKey = hk
+                        if (hk != null) msg += "\nNew fingerprint: ${hk.getFingerPrint(jsch)}"
+                    }
                     if (SshTunnelLogic.isFatalSshError(e.message)) {
+                        // Stop retrying; clear isActive before broadcasting so the UI re-enables Start
                         shouldRun = false
+                        isActive = false
                     }
-                    if (shouldRun) {
-                        val msg = SshTunnelLogic.describeError(e.message, host, consecutiveFailures)
-                        sendStatus(msg); updateNotification(msg)
-                    }
+                    sendStatus(msg)
+                    // On fatal errors the service stops and removes its notification anyway
+                    if (shouldRun) updateNotification(msg)
                 } catch (e: UnknownHostException) {
                     consecutiveFailures++
                     if (shouldRun) {
@@ -440,7 +458,6 @@ class SshTunnelService : Service() {
         shouldRun = false
         isRunning = false
         isActive = false
-        lastStatus = ""
         connectionThread?.interrupt()
         proxyServer?.stop()
         session?.disconnect()
@@ -449,6 +466,21 @@ class SshTunnelService : Service() {
         releaseLocks()
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         super.onDestroy()
+    }
+}
+
+// ── Trust-on-first-use host key repository ────────────────────────────
+// Unknown hosts are remembered on first connect; a changed key is reported
+// as CHANGED so JSch (StrictHostKeyChecking=yes) refuses the connection.
+
+private class TofuHostKeyRepository(
+    private val delegate: HostKeyRepository
+) : HostKeyRepository by delegate {
+    override fun check(host: String, key: ByteArray): Int {
+        val result = delegate.check(host, key)
+        if (result != HostKeyRepository.NOT_INCLUDED) return result
+        delegate.add(HostKey(host, key), null)
+        return HostKeyRepository.OK
     }
 }
 
