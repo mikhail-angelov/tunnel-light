@@ -429,7 +429,7 @@ class SshTunnelService : Service() {
 
     private fun sendStatus(message: String) {
         lastStatus = message
-        sendBroadcast(Intent(ACTION_STATUS).putExtra(EXTRA_STATUS, message))
+        sendBroadcast(Intent(ACTION_STATUS).setPackage(packageName).putExtra(EXTRA_STATUS, message))
     }
 
     private fun updateNotification(message: String) {
