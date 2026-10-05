@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 11 and lower: keep the SSH key pair out of backups -->
+<full-backup-content>
+    <exclude domain="file" path="id_ed25519" />
+    <exclude domain="file" path="id_ed25519.pub" />
+</full-backup-content>
