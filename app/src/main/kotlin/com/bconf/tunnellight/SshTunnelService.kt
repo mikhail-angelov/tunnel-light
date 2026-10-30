@@ -30,7 +30,6 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
-import java.util.concurrent.atomic.AtomicBoolean
 
 class SshTunnelService : Service() {
 
@@ -616,36 +615,49 @@ private class Socks5ProxyServer(
             ch.setPort(targetPort)
             ch.setOrgIPAddress("127.0.0.1")
             ch.setOrgPort(listenPort)
-
             try {
-                ch.connect(5_000)
-            } catch (e: Exception) {
-                out.write(byteArrayOf(5, 5, 0, 1, 0, 0, 0, 0, 0, 0)); out.flush()
-                client.close(); return
+                try {
+                    ch.connect(5_000)
+                } catch (e: Exception) {
+                    out.write(byteArrayOf(5, 5, 0, 1, 0, 0, 0, 0, 0, 0)); out.flush()
+                    return
+                }
+
+                out.write(byteArrayOf(5, 0, 0, 1, 0, 0, 0, 0, 0, 0)); out.flush()
+
+                // The handshake timeout must not close an otherwise healthy idle tunnel.
+                client.soTimeout = 0
+                val chIn = ch.inputStream
+                val chOut = ch.outputStream
+                val clientToSsh = Thread {
+                    try {
+                        pump(inp, chOut)
+                    } finally {
+                        ch.disconnect()
+                        runCatching { client.close() }
+                    }
+                }
+                clientToSsh.start()
+                try {
+                    pump(chIn, out)
+                } finally {
+                    ch.disconnect()
+                    runCatching { client.close() }
+                    clientToSsh.join(1_000)
+                }
+            } finally {
+                ch.disconnect()
             }
-
-            out.write(byteArrayOf(5, 0, 0, 1, 0, 0, 0, 0, 0, 0)); out.flush()
-
-            // ── Bidirectional pump ──
-            val chIn = ch.inputStream
-            val chOut = ch.outputStream
-            val stopped = AtomicBoolean(false)
-            val t = Thread { pump(inp, chOut, stopped) }
-            t.start()
-            pump(chIn, out, stopped)
-            stopped.set(true)
-            t.join(1000)
-            ch.disconnect()
         } catch (_: Exception) {
         } finally {
             runCatching { client.close() }
         }
     }
 
-    private fun pump(src: InputStream, dst: OutputStream, stopped: AtomicBoolean) {
+    private fun pump(src: InputStream, dst: OutputStream) {
         try {
             val buf = ByteArray(8192)
-            while (!stopped.get()) {
+            while (true) {
                 val n = src.read(buf)
                 if (n == -1) break
                 dst.write(buf, 0, n)
