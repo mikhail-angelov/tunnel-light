@@ -540,7 +540,7 @@ private class Socks5ProxyServer(
 ) {
     private var serverSocket: ServerSocket? = null
     @Volatile private var running = false
-    private val executor = Executors.newFixedThreadPool(20)
+    private val executor = Executors.newCachedThreadPool()
 
     fun start() {
         running = true
