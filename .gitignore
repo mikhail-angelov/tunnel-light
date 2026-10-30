@@ -8,10 +8,21 @@ app/build/
 *.iml
 local.properties
 
+# Local machine files
+.DS_Store
+.env
+.env.*
+!.env.example
+
 # Keys / secrets
 keystore/
 *.jks
 *.keystore
+sfa-setup/
+id_ed25519_sfa*
+ssh_host_key.pub
+sfa-ssh.json
+server/xray/generated/
 
 # Backups
 *.bak
